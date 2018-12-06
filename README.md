@@ -1,6 +1,15 @@
 GalapagoPro System76 fan unfucker ~~Clevo Fan Control Indicator for Ubuntu~~
 ======================================
 
+Do you fucking hate your stupid fucking fan on your stupid fucking laptop because its fucking loud as fuck and goes crazy when it doesn't need to?
+
+Do you also have a system76 galapago pro?  Or some other clevo laptop that this happens to work on (you better see the original author that this repo was forked from)?
+
+ALl I did was add a new option to turn the fan to 1% so it can shut the fuck up for a second.  obviously this can let your cpu get hot.  so, use this wisely.  i am sure if you are her eyou hate your fan so much you hope the fucking cpu does melt.
+
+==========================================
+everything below from the original repo, and still applies (installation/compilation,etc)
+
 This program is an Ubuntu indicator to control the fan of Clevo laptops, using reversed-engineering port information from ECView.
 
 It shows the CPU temperature on the left and the GPU temperature on the right, and a menu for manual control.
