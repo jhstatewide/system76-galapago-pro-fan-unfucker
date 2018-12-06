@@ -123,6 +123,7 @@ struct {
         { "Set FAN to  70%", G_CALLBACK(ui_command_set_fan), 70, MANUAL, NULL },
         { "Set FAN to  80%", G_CALLBACK(ui_command_set_fan), 80, MANUAL, NULL },
         { "Set FAN to  90%", G_CALLBACK(ui_command_set_fan), 90, MANUAL, NULL },
+        { "Set FAN to  1%", G_CALLBACK(ui_command_set_fan), 1, MANUAL, NULL },
         { "Set FAN to 100%", G_CALLBACK(ui_command_set_fan), 100, MANUAL, NULL },
         { "", NULL, 0L, NA, NULL },
         { "Quit", G_CALLBACK(ui_command_quit), 0L, NA, NULL }
@@ -500,7 +501,7 @@ static int ec_query_fan_rpms(void) {
 }
 
 static int ec_write_fan_duty(int duty_percentage) {
-    if (duty_percentage < 60 || duty_percentage > 100) {
+    if (duty_percentage < 1 || duty_percentage > 100) {
         printf("Wrong fan duty to write: %d\n", duty_percentage);
         return EXIT_FAILURE;
     }
