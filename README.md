@@ -1,4 +1,4 @@
-Clevo Fan Control Indicator for Ubuntu
+GalapagoPro System76 fan unfucker ~~Clevo Fan Control Indicator for Ubuntu~~
 ======================================
 
 This program is an Ubuntu indicator to control the fan of Clevo laptops, using reversed-engineering port information from ECView.
