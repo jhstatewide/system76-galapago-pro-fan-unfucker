@@ -5,7 +5,7 @@ This program is an Ubuntu indicator to control the fan of Clevo laptops, using r
 
 It shows the CPU temperature on the left and the GPU temperature on the right, and a menu for manual control.
 
-![Clevo Indicator Screen](http://i.imgur.com/ucwWxLq.png)
+![Clevo Indicator Screen](https://imgur.com/a/hS3r4mS)
 
 
 
