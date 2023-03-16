@@ -442,44 +442,51 @@ static void ec_on_sigterm(int signum) {
         share_info->exit = 1;
 }
 
+#define TARGET_TEMP 50
+
 static int ec_auto_duty_adjust(void) {
     int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
     int duty = share_info->fan_duty;
-    //
-    if (temp >= 80 && duty < 100)
-        return 100;
-    if (temp >= 70 && duty < 90)
-        return 90;
-    if (temp >= 60 && duty < 80)
-        return 80;
-    if (temp >= 50 && duty < 70)
-        return 70;
-    if (temp >= 40 && duty < 60)
-        return 60;
-    if (temp >= 30 && duty < 50)
-        return 50;
-    if (temp >= 20 && duty < 40)
-        return 40;
-    if (temp >= 10 && duty < 30)
-        return 30;
-    //
-    if (temp <= 15 && duty > 30)
-        return 30;
-    if (temp <= 25 && duty > 40)
-        return 40;
-    if (temp <= 35 && duty > 50)
-        return 50;
-    if (temp <= 45 && duty > 60)
-        return 60;
-    if (temp <= 55 && duty > 70)
-        return 70;
-    if (temp <= 65 && duty > 80)
-        return 80;
-    if (temp <= 75 && duty > 90)
-        return 90;
-    //
-    return 0;
+    int new_duty = duty;
+
+    if (temp >= TARGET_TEMP + 5) {
+        if (duty >= 80) {
+            new_duty = MIN(100, duty + 5);
+        } else if (duty >= 50) {
+            new_duty = MIN(80, duty + 10);
+        } else {
+            new_duty = MIN(60, duty + 15);
+        }
+    } else if (temp >= TARGET_TEMP + 2) {
+        if (duty >= 80) {
+            new_duty = MAX(70, duty - 5);
+        } else if (duty >= 50) {
+            new_duty = MAX(50, duty - 10);
+        } else {
+            new_duty = MAX(30, duty - 15);
+        }
+    } else if (temp >= TARGET_TEMP - 3) {
+        if (duty >= 80) {
+            new_duty = MAX(40, duty - 10);
+        } else if (duty >= 50) {
+            new_duty = MAX(30, duty - 15);
+        } else {
+            new_duty = MAX(1, duty - 20);
+        }
+    } else {
+        new_duty = MAX(1, duty - 20);
+    }
+
+    if (new_duty != duty) {
+        // share_info->fan_duty = new_duty;
+        printf("Adjusted fan duty from %d to %d (temp: %d)\n", duty, new_duty, temp);
+    }
+    // log anyway...
+    printf("Fan duty: %d (temp: %d)\n", new_duty, temp);
+
+    return new_duty;
 }
+
 
 static int ec_query_cpu_temp(void) {
     return ec_io_read(EC_REG_CPU_TEMP);
