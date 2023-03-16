@@ -442,53 +442,30 @@ static void ec_on_sigterm(int signum) {
         share_info->exit = 1;
 }
 
-#define TARGET_TEMP 60
-#define MAX_TEMP_DIFF 5
-
 static int ec_auto_duty_adjust(void) {
     int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
     int duty = share_info->fan_duty;
     int new_duty = duty;
 
-
-    if (temp >= TARGET_TEMP + MAX_TEMP_DIFF) {
-        if (duty >= 80) {
-            new_duty = MIN(100, duty + 2);
-        } else if (duty >= 50) {
-            new_duty = MIN(80, duty + 5);
-        } else {
-            new_duty = MIN(60, duty + 10);
-        }
-    } else if (temp >= TARGET_TEMP + 2) {
-        if (duty >= 80) {
-            new_duty = MAX(70, duty - 2);
-        } else if (duty >= 50) {
-            new_duty = MAX(50, duty - 5);
-        } else {
-            new_duty = MAX(30, duty - 10);
-        }
-    } else if (temp >= TARGET_TEMP - 3) {
-        if (duty >= 80) {
-            new_duty = MAX(40, duty - 5);
-        } else if (duty >= 50) {
-            new_duty = MAX(30, duty - 10);
-        } else {
-            new_duty = MAX(1, duty - 15);
-        }
-    } else {
-        new_duty = MAX(1, duty - 20);
+    if (temp >= 65) {
+        // Gradually increase fan duty cycle to find steady state
+        new_duty = MAX(duty + 2, 10);
+    }
+    else {
+        // Decrease fan duty cycle if temperature is below 65°C
+        new_duty = MAX(duty - 2, 0);
     }
 
-    if (new_duty != duty) {
-        // share_info->fan_duty = new_duty;
-        printf("Adjusted fan duty from %d to %d (temp: %d)\n", duty, new_duty, temp);
+    if (new_duty > 100) {
+        new_duty = 100;
+    } else if (new_duty < 0) {
+        new_duty = 0;
     }
-    // log anyway...
-    printf("Fan duty: %d (temp: %d)\n", new_duty, temp);
+
+    // printf("Auto duty adjust: %d -> %d\n", duty, new_duty);
 
     return new_duty;
 }
-
 
 
 
