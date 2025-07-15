@@ -97,19 +97,17 @@ bool privilege_can_access_ec(void) {
 
 bool privilege_elevate(void) {
     privilege_status_t status = privilege_check_status();
-    fprintf(stderr, "[DEBUG] privilege_elevate: euid=%d, uid=%d, has_privileges=%d\n", (int)geteuid(), (int)getuid(), status.has_privileges);
+    
     if (status.has_privileges) {
-        fprintf(stderr, "[DEBUG] Already have privileges\n");
         return true; // Already have privileges
     }
     
     privilege_method_t method = privilege_get_best_method();
-    fprintf(stderr, "[DEBUG] privilege_get_best_method returned: %d (%s)\n", (int)method, privilege_method_name(method));
     
     switch (method) {
         case PRIV_METHOD_CAPABILITIES:
 #ifdef HAVE_LIBCAP
-            fprintf(stderr, "[DEBUG] Trying to add SYS_RAWIO capability\n");
+            // Try to add SYS_RAWIO capability
             cap_t caps = cap_get_proc();
             if (caps != NULL) {
                 cap_value_t cap_list[] = {CAP_SYS_RAWIO};
@@ -118,36 +116,25 @@ bool privilege_elevate(void) {
                         cap_free(caps);
                         current_status.method = PRIV_METHOD_CAPABILITIES;
                         current_status.has_privileges = privilege_can_access_ec();
-                        fprintf(stderr, "[DEBUG] cap_set_proc succeeded, can_access_ec=%d\n", current_status.has_privileges);
                         return current_status.has_privileges;
-                    } else {
-                        fprintf(stderr, "[DEBUG] cap_set_proc failed: %s\n", strerror(errno));
                     }
-                } else {
-                    fprintf(stderr, "[DEBUG] cap_set_flag failed: %s\n", strerror(errno));
                 }
                 cap_free(caps);
-            } else {
-                fprintf(stderr, "[DEBUG] cap_get_proc failed: %s\n", strerror(errno));
             }
 #else
-            fprintf(stderr, "[DEBUG] libcap not available at build time\n");
             current_status.error_message = "libcap not available at build time";
 #endif
             break;
             
         case PRIV_METHOD_PKEXEC:
-            fprintf(stderr, "[DEBUG] pkexec requires policy configuration\n");
             current_status.error_message = "pkexec requires policy configuration";
             break;
             
         case PRIV_METHOD_SUDO:
-            fprintf(stderr, "[DEBUG] sudo requires sudoers configuration\n");
             current_status.error_message = "sudo requires sudoers configuration";
             break;
             
         case PRIV_METHOD_SETUID:
-            fprintf(stderr, "[DEBUG] setuid method, geteuid()=%d\n", (int)geteuid());
             if (geteuid() == 0) {
                 current_status.method = PRIV_METHOD_SETUID;
                 current_status.has_privileges = true;
@@ -157,11 +144,10 @@ bool privilege_elevate(void) {
             break;
             
         default:
-            fprintf(stderr, "[DEBUG] no privilege elevation method available\n");
             current_status.error_message = "no privilege elevation method available";
             break;
     }
-    fprintf(stderr, "[DEBUG] privilege_elevate failed: %s\n", current_status.error_message ? current_status.error_message : "unknown error");
+    
     return false;
 }
 
