@@ -160,6 +160,7 @@ static pid_t parent_pid = 0;
 static int debug_mode = 0;
 static int status_mode = 0;
 static int status_interval = 2; // Default 2 seconds
+static int target_temperature = 65; // Default target temperature
 
 int main(int argc, char* argv[]) {
     printf("Simple fan control utility for Clevo laptops\n");
@@ -499,12 +500,12 @@ static int ec_auto_duty_adjust(void) {
     int duty = share_info->fan_duty;
     int new_duty = duty;
 
-    if (temp >= 65) {
+    if (temp >= target_temperature) {
         // Gradually increase fan duty cycle to find steady state
         new_duty = MAX(duty + 2, 10);
     }
     else {
-        // Decrease fan duty cycle if temperature is below 65°C
+        // Decrease fan duty cycle if temperature is below target
         new_duty = MAX(duty - 2, 0);
     }
 
@@ -673,6 +674,16 @@ static void parse_command_line(int argc, char* argv[]) {
                 printf("Error: --interval requires a value\n");
                 exit(EXIT_FAILURE);
             }
+        } else if (strcmp(argv[i], "--target-temp") == 0) {
+            if (i + 1 < argc) {
+                target_temperature = atoi(argv[i + 1]);
+                if (target_temperature < 40) target_temperature = 40;
+                if (target_temperature > 100) target_temperature = 100;
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --target-temp requires a value\n");
+                exit(EXIT_FAILURE);
+            }
         } else if (strcmp(argv[i], "-?") == 0 || strcmp(argv[i], "--help") == 0) {
             printf(
                     "\n\
@@ -684,6 +695,7 @@ Options:\n\
   --debug\t\tEnable debug output\n\
   --status\t\tEnable live status display mode\n\
   --interval <sec>\tSet status update interval (1-60 seconds, default: 2)\n\
+  --target-temp <\u00b0C>\tSet the target temperature for auto fan control (40-100\u00b0C, default: 65)\n\
   -?, --help\t\tDisplay this help and exit\n\
 \n\
 Arguments:\n\
@@ -693,6 +705,11 @@ Status Display Mode:\n\
   When --status is used, displays a live updating console interface\n\
   showing temperatures, fan speeds, and control status with visual\n\
   indicators and color coding.\n\
+\
+Target Temperature Control:\n\
+  Use --target-temp to set the desired temperature for auto fan control.\n\
+  The system will attempt to keep temperatures at or below this value.\n\
+  Example: --target-temp 60 will try to keep temps below 60\u00b0C.\n\
 \n\
 Modern Privilege Management:\n\
 This program now supports multiple privilege elevation methods:\n\
