@@ -106,6 +106,7 @@ static int calculate_fan_rpms(int raw_rpm_high, int raw_rpm_low);
 static int check_proc_instances(const char* proc_name);
 static void get_time_string(char* buffer, size_t max, const char* format);
 static void signal_term(__sighandler_t handler);
+static void parse_command_line(int argc, char* argv[]);
 
 static AppIndicator* indicator = NULL;
 
@@ -144,9 +145,14 @@ struct {
 }static *share_info = NULL;
 
 static pid_t parent_pid = 0;
+static int debug_mode = 0;
 
 int main(int argc, char* argv[]) {
     printf("Simple fan control utility for Clevo laptops\n");
+    
+    // Parse command line arguments
+    parse_command_line(argc, argv);
+    
     if (check_proc_instances(NAME) > 1) {
         printf("Multiple running instances!\n");
         char* display = getenv("DISPLAY");
@@ -167,7 +173,17 @@ int main(int argc, char* argv[]) {
         printf("unable to control EC: %s\n", strerror(errno));
         return EXIT_FAILURE;
     }
-    if (argc <= 1) {
+    // Find the first non-option argument
+    int fan_duty_arg = -1;
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] != '-') {
+            fan_duty_arg = i;
+            break;
+        }
+    }
+    
+    if (fan_duty_arg == -1) {
+        // No fan duty argument provided - run indicator mode
         char* display = getenv("DISPLAY");
         if (display == NULL || strlen(display) == 0) {
             return main_dump_fan();
@@ -191,49 +207,13 @@ int main(int argc, char* argv[]) {
             }
         }
     } else {
-        if (argv[1][0] == '-') {
-            printf(
-                    "\n\
-Usage: clevo-indicator [fan-duty-percentage]\n\
-\n\
-Dump/Control fan duty on Clevo laptops. Display indicator by default.\n\
-\n\
-Arguments:\n\
-  [fan-duty-percentage]\t\tTarget fan duty in percentage, from 40 to 100\n\
-  -?\t\t\t\tDisplay this help and exit\n\
-\n\
-Without arguments this program should attempt to display an indicator in\n\
-the Ubuntu tray area for fan information display and control. The indicator\n\
-requires this program to have setuid=root flag but run from the desktop user\n\
-, because a root user is not allowed to display a desktop indicator while a\n\
-non-root user is not allowed to control Clevo EC (Embedded Controller that's\n\
-responsible of the fan). Fix permissions of this executable if it fails to\n\
-run:\n\
-    sudo chown root clevo-indicator\n\
-    sudo chmod u+s  clevo-indicator\n\
-\n\
-Note any fan duty change should take 1-2 seconds to come into effect - you\n\
-can verify by the fan speed displayed on indicator icon and also louder fan\n\
-noise.\n\
-\n\
-In the indicator mode, this program would always attempt to load kernel\n\
-module 'ec_sys', in order to query EC information from\n\
-'/sys/kernel/debug/ec/ec0/io' instead of polling EC ports for readings,\n\
-which may be more risky if interrupted or concurrently operated during the\n\
-process.\n\
-\n\
-DO NOT MANIPULATE OR QUERY EC I/O PORTS WHILE THIS PROGRAM IS RUNNING.\n\
-\n");
-            return main_dump_fan();
-        } else {
-            int val = atoi(argv[1]);
-            if (val < 40 || val > 100)
-                    {
-                printf("invalid fan duty %d!\n", val);
-                return EXIT_FAILURE;
-            }
-            return main_test_fan(val);
+        // Fan duty argument provided
+        int val = atoi(argv[fan_duty_arg]);
+        if (val < 40 || val > 100) {
+            printf("invalid fan duty %d!\n", val);
+            return EXIT_FAILURE;
         }
+        return main_test_fan(val);
     }
     return EXIT_SUCCESS;
 }
@@ -255,7 +235,7 @@ static void main_init_share(void) {
 
 static int main_ec_worker(void) {
     setuid(0);
-    printf("[DEBUG] Worker started, attempting to modprobe ec_sys\n");
+    if (debug_mode) printf("[DEBUG] Worker started, attempting to modprobe ec_sys\n");
     system("modprobe ec_sys");
     
     // Try to determine if sysfs method is available
@@ -264,25 +244,25 @@ static int main_ec_worker(void) {
     if (io_fd >= 0) {
         sysfs_available = 1;
         close(io_fd);
-        printf("[DEBUG] sysfs method available\n");
+        if (debug_mode) printf("[DEBUG] sysfs method available\n");
     } else {
-        printf("[DEBUG] sysfs method not available, falling back to direct I/O\n");
+        if (debug_mode) printf("[DEBUG] sysfs method not available, falling back to direct I/O\n");
     }
     
     int loop_count = 0;
     while (share_info->exit == 0) {
-        printf("[DEBUG] Worker loop iteration %d\n", loop_count++);
+        if (debug_mode) printf("[DEBUG] Worker loop iteration %d\n", loop_count++);
         // check parent
         if (parent_pid != 0 && kill(parent_pid, 0) == -1) {
-            printf("[DEBUG] worker on parent death\n");
+            if (debug_mode) printf("[DEBUG] worker on parent death\n");
             break;
         }
         // write EC
         int new_fan_duty = share_info->manual_next_fan_duty;
         if (new_fan_duty != 0 && new_fan_duty != share_info->manual_prev_fan_duty) {
-            printf("[DEBUG] Writing new fan duty: %d\n", new_fan_duty);
+            if (debug_mode) printf("[DEBUG] Writing new fan duty: %d\n", new_fan_duty);
             int write_result = ec_write_fan_duty(new_fan_duty);
-            printf("[DEBUG] ec_write_fan_duty returned: %d\n", write_result);
+            if (debug_mode) printf("[DEBUG] ec_write_fan_duty returned: %d\n", write_result);
             share_info->manual_prev_fan_duty = new_fan_duty;
         }
         
@@ -290,16 +270,16 @@ static int main_ec_worker(void) {
         if (sysfs_available) {
             int io_fd = open("/sys/kernel/debug/ec/ec0/io", O_RDONLY, 0);
             if (io_fd < 0) {
-                printf("[DEBUG] sysfs method failed, switching to direct I/O\n");
+                if (debug_mode) printf("[DEBUG] sysfs method failed, switching to direct I/O\n");
                 sysfs_available = 0;
             } else {
                 unsigned char buf[EC_REG_SIZE];
                 ssize_t len = read(io_fd, buf, EC_REG_SIZE);
                 close(io_fd);
-                printf("[DEBUG] sysfs read returned len=%ld\n", len);
+                if (debug_mode) printf("[DEBUG] sysfs read returned len=%ld\n", len);
                 switch (len) {
                 case -1:
-                    printf("[DEBUG] unable to read EC from sysfs: %s\n", strerror(errno));
+                    if (debug_mode) printf("[DEBUG] unable to read EC from sysfs: %s\n", strerror(errno));
                     sysfs_available = 0;
                     break;
                 case 0x100:
@@ -307,10 +287,10 @@ static int main_ec_worker(void) {
                     share_info->gpu_temp = buf[EC_REG_GPU_TEMP];
                     share_info->fan_duty = calculate_fan_duty(buf[EC_REG_FAN_DUTY]);
                     share_info->fan_rpms = calculate_fan_rpms(buf[EC_REG_FAN_RPMS_HI], buf[EC_REG_FAN_RPMS_LO]);
-                    printf("[DEBUG] sysfs: cpu_temp=%d, gpu_temp=%d, fan_duty=%d, fan_rpms=%d\n", share_info->cpu_temp, share_info->gpu_temp, share_info->fan_duty, share_info->fan_rpms);
+                    if (debug_mode) printf("[DEBUG] sysfs: cpu_temp=%d, gpu_temp=%d, fan_duty=%d, fan_rpms=%d\n", share_info->cpu_temp, share_info->gpu_temp, share_info->fan_duty, share_info->fan_rpms);
                     break;
                 default:
-                    printf("[DEBUG] wrong EC size from sysfs: %ld\n", len);
+                    if (debug_mode) printf("[DEBUG] wrong EC size from sysfs: %ld\n", len);
                     sysfs_available = 0;
                 }
             }
@@ -318,36 +298,36 @@ static int main_ec_worker(void) {
         
         // Fall back to direct I/O if sysfs is not available
         if (!sysfs_available) {
-            printf("[DEBUG] Using direct I/O for EC access\n");
+            if (debug_mode) printf("[DEBUG] Using direct I/O for EC access\n");
             share_info->cpu_temp = ec_query_cpu_temp();
             share_info->gpu_temp = ec_query_gpu_temp();
             share_info->fan_duty = ec_query_fan_duty();
             share_info->fan_rpms = ec_query_fan_rpms();
-            printf("[DEBUG] direct I/O: cpu_temp=%d, gpu_temp=%d, fan_duty=%d, fan_rpms=%d\n", share_info->cpu_temp, share_info->gpu_temp, share_info->fan_duty, share_info->fan_rpms);
+            if (debug_mode) printf("[DEBUG] direct I/O: cpu_temp=%d, gpu_temp=%d, fan_duty=%d, fan_rpms=%d\n", share_info->cpu_temp, share_info->gpu_temp, share_info->fan_duty, share_info->fan_rpms);
         }
         
         // auto EC
         if (share_info->auto_duty == 1) {
             int next_duty = ec_auto_duty_adjust();
-            printf("[DEBUG] auto_duty=1, next_duty=%d, prev_auto_duty_val=%d\n", next_duty, share_info->auto_duty_val);
+            if (debug_mode) printf("[DEBUG] auto_duty=1, next_duty=%d, prev_auto_duty_val=%d\n", next_duty, share_info->auto_duty_val);
             if (next_duty != 0 && next_duty != share_info->auto_duty_val) {
                 char s_time[256];
                 get_time_string(s_time, 256, "%m/%d %H:%M:%S");
                 printf("%s CPU=%d°C, GPU=%d°C, auto fan duty to %d%%\n", s_time, share_info->cpu_temp, share_info->gpu_temp, next_duty);
                 int write_result = ec_write_fan_duty(next_duty);
-                printf("[DEBUG] ec_write_fan_duty (auto) returned: %d\n", write_result);
+                if (debug_mode) printf("[DEBUG] ec_write_fan_duty (auto) returned: %d\n", write_result);
                 share_info->auto_duty_val = next_duty;
             }
         }
         //
         usleep(200 * 1000);
     }
-    printf("[DEBUG] Worker quit (share_info->exit=%d)\n", share_info->exit);
+    if (debug_mode) printf("[DEBUG] Worker quit (share_info->exit=%d)\n", share_info->exit);
     return EXIT_SUCCESS;
 }
 
 static void main_ui_worker(int argc, char** argv) {
-    printf("Indicator...\n");
+    if (debug_mode) printf("Indicator...\n");
     int desktop_uid = getuid();
     setuid(desktop_uid);
     //
@@ -380,16 +360,16 @@ static void main_ui_worker(int argc, char** argv) {
     g_timeout_add(500, &ui_update, NULL);
     ui_toggle_menuitems(share_info->fan_duty);
     gtk_main();
-    printf("main on UI quit\n");
+    if (debug_mode) printf("main on UI quit\n");
 }
 
 static void main_on_sigchld(int signum) {
-    printf("main on worker quit signal\n");
+    if (debug_mode) printf("main on worker quit signal\n");
     exit(EXIT_SUCCESS);
 }
 
 static void main_on_sigterm(int signum) {
-    printf("main on signal: %s\n", strsignal(signum));
+    if (debug_mode) printf("main on signal: %s\n", strsignal(signum));
     if (share_info != NULL)
         share_info->exit = 1;
     exit(EXIT_SUCCESS);
@@ -427,12 +407,12 @@ static gboolean ui_update(gpointer user_data) {
 static void ui_command_set_fan(long fan_duty) {
     int fan_duty_val = (int) fan_duty;
     if (fan_duty_val == 0) {
-        printf("clicked on fan duty auto\n");
+        if (debug_mode) printf("clicked on fan duty auto\n");
         share_info->auto_duty = 1;
         share_info->auto_duty_val = 0;
         share_info->manual_next_fan_duty = 0;
     } else {
-        printf("clicked on fan duty: %d\n", fan_duty_val);
+        if (debug_mode) printf("clicked on fan duty: %d\n", fan_duty_val);
         share_info->auto_duty = 0;
         share_info->auto_duty_val = 0;
         share_info->manual_next_fan_duty = fan_duty_val;
@@ -441,7 +421,7 @@ static void ui_command_set_fan(long fan_duty) {
 }
 
 static void ui_command_quit(gchar* command) {
-    printf("clicked on quit\n");
+    if (debug_mode) printf("clicked on quit\n");
     gtk_main_quit();
 }
 
@@ -468,7 +448,7 @@ static int ec_init(void) {
 }
 
 static void ec_on_sigterm(int signum) {
-    printf("ec on signal: %s\n", strsignal(signum));
+    if (debug_mode) printf("ec on signal: %s\n", strsignal(signum));
     if (share_info != NULL)
         share_info->exit = 1;
 }
@@ -634,4 +614,49 @@ static void signal_term(__sighandler_t handler) {
     signal(SIGTERM, handler);
     signal(SIGUSR1, handler);
     signal(SIGUSR2, handler);
+}
+
+static void parse_command_line(int argc, char* argv[]) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--debug") == 0) {
+            debug_mode = 1;
+        } else if (strcmp(argv[i], "-?") == 0 || strcmp(argv[i], "--help") == 0) {
+            printf(
+                    "\n\
+Usage: clevo-indicator [OPTIONS] [fan-duty-percentage]\n\
+\n\
+Dump/Control fan duty on Clevo laptops. Display indicator by default.\n\
+\n\
+Options:\n\
+  --debug\t\tEnable debug output\n\
+  -?, --help\t\tDisplay this help and exit\n\
+\n\
+Arguments:\n\
+  [fan-duty-percentage]\tTarget fan duty in percentage, from 40 to 100\n\
+\n\
+Without arguments this program should attempt to display an indicator in\n\
+the Ubuntu tray area for fan information display and control. The indicator\n\
+requires this program to have setuid=root flag but run from the desktop user\n\
+, because a root user is not allowed to display a desktop indicator while a\n\
+non-root user is not allowed to control Clevo EC (Embedded Controller that's\n\
+responsible of the fan). Fix permissions of this executable if it fails to\n\
+run:\n\
+    sudo chown root clevo-indicator\n\
+    sudo chmod u+s  clevo-indicator\n\
+\n\
+Note any fan duty change should take 1-2 seconds to come into effect - you\n\
+can verify by the fan speed displayed on indicator icon and also louder fan\n\
+noise.\n\
+\n\
+In the indicator mode, this program would always attempt to load kernel\n\
+module 'ec_sys', in order to query EC information from\n\
+'/sys/kernel/debug/ec/ec0/io' instead of polling EC ports for readings,\n\
+which may be more risky if interrupted or concurrently operated during the\n\
+process.\n\
+\n\
+DO NOT MANIPULATE OR QUERY EC I/O PORTS WHILE THIS PROGRAM IS RUNNING.\n\
+\n");
+            exit(EXIT_SUCCESS);
+        }
+    }
 }
