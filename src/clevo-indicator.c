@@ -110,6 +110,15 @@ static void signal_term(__sighandler_t handler);
 static void parse_command_line(int argc, char* argv[]);
 static bool setup_privileges(void);
 static void show_privilege_help(void);
+static void status_display_init(void);
+static void status_display_update(void);
+static void status_display_update_with_control(void);
+static void status_display_cleanup(void);
+static void status_display_show_help(void);
+static char* status_get_temp_bar(int temp, int max_temp);
+static char* status_get_fan_bar(int rpm, int max_rpm);
+static char* status_get_color_code(int temp);
+static void status_clear_screen(void);
 
 static AppIndicator* indicator = NULL;
 
@@ -149,6 +158,8 @@ struct {
 
 static pid_t parent_pid = 0;
 static int debug_mode = 0;
+static int status_mode = 0;
+static int status_interval = 2; // Default 2 seconds
 
 int main(int argc, char* argv[]) {
     printf("Simple fan control utility for Clevo laptops\n");
@@ -183,6 +194,23 @@ int main(int argc, char* argv[]) {
         printf("unable to control EC: %s\n", strerror(errno));
         return EXIT_FAILURE;
     }
+    
+    // Handle status mode
+    if (status_mode) {
+        signal_term(&main_on_sigterm);
+        status_display_init();
+        status_display_show_help();
+        
+        // Initialize shared memory for status mode
+        main_init_share();
+        
+        // Run status display loop with auto fan control
+        while (1) {
+            status_display_update_with_control();
+            usleep(status_interval * 1000000); // Convert to microseconds
+        }
+    }
+    
     // Find the first non-option argument
     int fan_duty_arg = -1;
     for (int i = 1; i < argc; i++) {
@@ -380,6 +408,9 @@ static void main_on_sigchld(int signum) {
 
 static void main_on_sigterm(int signum) {
     if (debug_mode) printf("main on signal: %s\n", strsignal(signum));
+    if (status_mode) {
+        status_display_cleanup();
+    }
     if (share_info != NULL)
         share_info->exit = 1;
     exit(EXIT_SUCCESS);
@@ -630,6 +661,18 @@ static void parse_command_line(int argc, char* argv[]) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--debug") == 0) {
             debug_mode = 1;
+        } else if (strcmp(argv[i], "--status") == 0) {
+            status_mode = 1;
+        } else if (strcmp(argv[i], "--interval") == 0) {
+            if (i + 1 < argc) {
+                status_interval = atoi(argv[i + 1]);
+                if (status_interval < 1) status_interval = 1;
+                if (status_interval > 60) status_interval = 60;
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --interval requires a value\n");
+                exit(EXIT_FAILURE);
+            }
         } else if (strcmp(argv[i], "-?") == 0 || strcmp(argv[i], "--help") == 0) {
             printf(
                     "\n\
@@ -639,10 +682,17 @@ Dump/Control fan duty on Clevo laptops. Display indicator by default.\n\
 \n\
 Options:\n\
   --debug\t\tEnable debug output\n\
+  --status\t\tEnable live status display mode\n\
+  --interval <sec>\tSet status update interval (1-60 seconds, default: 2)\n\
   -?, --help\t\tDisplay this help and exit\n\
 \n\
 Arguments:\n\
   [fan-duty-percentage]\tTarget fan duty in percentage, from 40 to 100\n\
+\n\
+Status Display Mode:\n\
+  When --status is used, displays a live updating console interface\n\
+  showing temperatures, fan speeds, and control status with visual\n\
+  indicators and color coding.\n\
 \n\
 Modern Privilege Management:\n\
 This program now supports multiple privilege elevation methods:\n\
@@ -735,4 +785,198 @@ static void show_privilege_help(void) {
     
     printf("5. Sudoers (Alternative):\n");
     printf("   echo '%%sudo ALL=(ALL) NOPASSWD: /usr/local/bin/clevo-indicator' | sudo tee /etc/sudoers.d/clevo-indicator\n\n");
+}
+
+// Status display functions
+static void status_display_init(void) {
+    // Set up terminal for better display
+    printf("\033[?25l"); // Hide cursor
+    status_clear_screen();
+}
+
+static void status_display_cleanup(void) {
+    printf("\033[?25h"); // Show cursor
+    printf("\033[0m");   // Reset colors
+    printf("\n");
+}
+
+static void status_clear_screen(void) {
+    printf("\033[2J");   // Clear screen
+    printf("\033[H");    // Move cursor to top-left
+}
+
+static char* status_get_color_code(int temp) {
+    if (temp < 50) return "\033[32m";      // Green for cool
+    if (temp < 70) return "\033[33m";      // Yellow for warm
+    if (temp < 85) return "\033[31m";      // Red for hot
+    return "\033[35m";                      // Magenta for critical
+}
+
+static char* status_get_temp_bar(int temp, int max_temp) {
+    static char bar[21];
+    int filled = (temp * 20) / max_temp;
+    if (filled > 20) filled = 20;
+    if (filled < 0) filled = 0;
+    
+    for (int i = 0; i < 20; i++) {
+        if (i < filled) {
+            bar[i] = '#';
+        } else {
+            bar[i] = '-';
+        }
+    }
+    bar[20] = '\0';
+    return bar;
+}
+
+static char* status_get_fan_bar(int rpm, int max_rpm) {
+    static char bar[21];
+    int filled = (rpm * 20) / max_rpm;
+    if (filled > 20) filled = 20;
+    if (filled < 0) filled = 0;
+    
+    for (int i = 0; i < 20; i++) {
+        if (i < filled) {
+            bar[i] = '#';
+        } else {
+            bar[i] = '-';
+        }
+    }
+    bar[20] = '\0';
+    return bar;
+}
+
+static void status_display_show_help(void) {
+    printf("\033[1;36m=== Clevo Fan Control - Live Status ===\033[0m\n");
+    printf("Press Ctrl+C to exit\n\n");
+}
+
+static void status_display_update(void) {
+    // Get current values
+    int cpu_temp = ec_query_cpu_temp();
+    int gpu_temp = ec_query_gpu_temp();
+    int fan_duty = ec_query_fan_duty();
+    int fan_rpms = ec_query_fan_rpms();
+    
+    // Get current time
+    char time_str[64];
+    get_time_string(time_str, sizeof(time_str), "%H:%M:%S");
+    
+    // Clear screen and move to top
+    status_clear_screen();
+    
+    // Header
+    printf("\033[1;36m=== Clevo Fan Control - Live Status ===\033[0m\n");
+    printf("Time: %s | Update Interval: %ds\n\n", time_str, status_interval);
+    
+    // Temperature section
+    printf("\033[1mTemperatures:\033[0m\n");
+    char* cpu_color = status_get_color_code(cpu_temp);
+    char* gpu_color = status_get_color_code(gpu_temp);
+    
+    printf("CPU: %s[%s] %s%d°C\033[0m\n", 
+           cpu_color, status_get_temp_bar(cpu_temp, 100), cpu_color, cpu_temp);
+    printf("GPU: %s[%s] %s%d°C\033[0m\n", 
+           gpu_color, status_get_temp_bar(gpu_temp, 100), gpu_color, gpu_temp);
+    
+    // Fan section
+    printf("\n\033[1mFan Status:\033[0m\n");
+    printf("Duty: %d%%\n", fan_duty);
+    printf("RPM:  [%s] %d RPM\n", status_get_fan_bar(fan_rpms, 4400), fan_rpms);
+    
+    // Mode indicator
+    printf("\n\033[1mControl Mode:\033[0m ");
+    if (fan_duty == 0) {
+        printf("\033[32m[AUTO]\033[0m - Automatic temperature-based control\n");
+    } else {
+        printf("\033[33m[MANUAL: %d%%]\033[0m - Manual fan control\n", fan_duty);
+    }
+    
+    // Status indicators
+    printf("\n\033[1mStatus:\033[0m\n");
+    if (cpu_temp > 80 || gpu_temp > 80) {
+        printf("  \033[31m⚠ CRITICAL TEMPERATURE\033[0m\n");
+    } else if (cpu_temp > 70 || gpu_temp > 70) {
+        printf("  \033[33m⚠ HIGH TEMPERATURE\033[0m\n");
+    } else {
+        printf("  \033[32m✓ Normal operation\033[0m\n");
+    }
+    
+    // Footer
+    printf("\n\033[2mPress Ctrl+C to exit\033[0m\n");
+    fflush(stdout);
+}
+
+static void status_display_update_with_control(void) {
+    // Update shared memory with current values
+    share_info->cpu_temp = ec_query_cpu_temp();
+    share_info->gpu_temp = ec_query_gpu_temp();
+    share_info->fan_duty = ec_query_fan_duty();
+    share_info->fan_rpms = ec_query_fan_rpms();
+    
+    // Run auto fan control logic
+    if (share_info->auto_duty == 1) {
+        int next_duty = ec_auto_duty_adjust();
+        if (next_duty != 0 && next_duty != share_info->auto_duty_val) {
+            char s_time[256];
+            get_time_string(s_time, 256, "%m/%d %H:%M:%S");
+            printf("%s CPU=%d°C, GPU=%d°C, auto fan duty to %d%%\n", s_time, share_info->cpu_temp, share_info->gpu_temp, next_duty);
+            printf("[DEBUG] Attempting to set fan duty to %d\n", next_duty);
+            int write_result = ec_write_fan_duty(next_duty);
+            printf("[DEBUG] ec_write_fan_duty returned: %d\n", write_result);
+            int verify_duty = ec_query_fan_duty();
+            printf("[DEBUG] Fan duty after write: %d\n", verify_duty);
+            if (debug_mode) printf("[DEBUG] ec_write_fan_duty (auto) returned: %d\n", write_result);
+            share_info->auto_duty_val = next_duty;
+            share_info->fan_duty = next_duty; // Update the displayed value
+        }
+    }
+    
+    // Get current time
+    char time_str[64];
+    get_time_string(time_str, sizeof(time_str), "%H:%M:%S");
+    
+    // Clear screen and move to top
+    status_clear_screen();
+    
+    // Header
+    printf("\033[1;36m=== Clevo Fan Control - Live Status ===\033[0m\n");
+    printf("Time: %s | Update Interval: %ds\n\n", time_str, status_interval);
+    
+    // Temperature section
+    printf("\033[1mTemperatures:\033[0m\n");
+    char* cpu_color = status_get_color_code(share_info->cpu_temp);
+    char* gpu_color = status_get_color_code(share_info->gpu_temp);
+    
+    printf("CPU: %s[%s] %s%d°C\033[0m\n", 
+           cpu_color, status_get_temp_bar(share_info->cpu_temp, 100), cpu_color, share_info->cpu_temp);
+    printf("GPU: %s[%s] %s%d°C\033[0m\n", 
+           gpu_color, status_get_temp_bar(share_info->gpu_temp, 100), gpu_color, share_info->gpu_temp);
+    
+    // Fan section
+    printf("\n\033[1mFan Status:\033[0m\n");
+    printf("Duty: %d%%\n", share_info->fan_duty);
+    printf("RPM:  [%s] %d RPM\n", status_get_fan_bar(share_info->fan_rpms, 4400), share_info->fan_rpms);
+    
+    // Mode indicator
+    printf("\n\033[1mControl Mode:\033[0m ");
+    if (share_info->auto_duty == 1) {
+        printf("\033[32m[AUTO]\033[0m - Automatic temperature-based control\n");
+    } else {
+        printf("\033[33m[MANUAL: %d%%]\033[0m - Manual fan control\n", share_info->fan_duty);
+    }
+    
+    // Status indicators
+    printf("\n\033[1mStatus:\033[0m\n");
+    if (share_info->cpu_temp > 80 || share_info->gpu_temp > 80) {
+        printf("  \033[31m⚠ CRITICAL TEMPERATURE\033[0m\n");
+    } else if (share_info->cpu_temp > 70 || share_info->gpu_temp > 70) {
+        printf("  \033[33m⚠ HIGH TEMPERATURE\033[0m\n");
+    } else {
+        printf("  \033[32m✓ Normal operation\033[0m\n");
+    }
+    
+    // Footer
+    printf("\n\033[2mPress Ctrl+C to exit\033[0m\n");
+    fflush(stdout);
 }
