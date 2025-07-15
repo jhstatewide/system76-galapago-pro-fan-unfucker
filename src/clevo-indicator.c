@@ -255,63 +255,94 @@ static void main_init_share(void) {
 
 static int main_ec_worker(void) {
     setuid(0);
+    printf("[DEBUG] Worker started, attempting to modprobe ec_sys\n");
     system("modprobe ec_sys");
+    
+    // Try to determine if sysfs method is available
+    int sysfs_available = 0;
+    int io_fd = open("/sys/kernel/debug/ec/ec0/io", O_RDONLY, 0);
+    if (io_fd >= 0) {
+        sysfs_available = 1;
+        close(io_fd);
+        printf("[DEBUG] sysfs method available\n");
+    } else {
+        printf("[DEBUG] sysfs method not available, falling back to direct I/O\n");
+    }
+    
+    int loop_count = 0;
     while (share_info->exit == 0) {
+        printf("[DEBUG] Worker loop iteration %d\n", loop_count++);
         // check parent
         if (parent_pid != 0 && kill(parent_pid, 0) == -1) {
-            printf("worker on parent death\n");
+            printf("[DEBUG] worker on parent death\n");
             break;
         }
         // write EC
         int new_fan_duty = share_info->manual_next_fan_duty;
-        if (new_fan_duty != 0
-                && new_fan_duty != share_info->manual_prev_fan_duty) {
-            ec_write_fan_duty(new_fan_duty);
+        if (new_fan_duty != 0 && new_fan_duty != share_info->manual_prev_fan_duty) {
+            printf("[DEBUG] Writing new fan duty: %d\n", new_fan_duty);
+            int write_result = ec_write_fan_duty(new_fan_duty);
+            printf("[DEBUG] ec_write_fan_duty returned: %d\n", write_result);
             share_info->manual_prev_fan_duty = new_fan_duty;
         }
-        // read EC
-        int io_fd = open("/sys/kernel/debug/ec/ec0/io", O_RDONLY, 0);
-        if (io_fd < 0) {
-            printf("unable to read EC from sysfs: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+        
+        // read EC - try sysfs first, fall back to direct I/O
+        if (sysfs_available) {
+            int io_fd = open("/sys/kernel/debug/ec/ec0/io", O_RDONLY, 0);
+            if (io_fd < 0) {
+                printf("[DEBUG] sysfs method failed, switching to direct I/O\n");
+                sysfs_available = 0;
+            } else {
+                unsigned char buf[EC_REG_SIZE];
+                ssize_t len = read(io_fd, buf, EC_REG_SIZE);
+                close(io_fd);
+                printf("[DEBUG] sysfs read returned len=%ld\n", len);
+                switch (len) {
+                case -1:
+                    printf("[DEBUG] unable to read EC from sysfs: %s\n", strerror(errno));
+                    sysfs_available = 0;
+                    break;
+                case 0x100:
+                    share_info->cpu_temp = buf[EC_REG_CPU_TEMP];
+                    share_info->gpu_temp = buf[EC_REG_GPU_TEMP];
+                    share_info->fan_duty = calculate_fan_duty(buf[EC_REG_FAN_DUTY]);
+                    share_info->fan_rpms = calculate_fan_rpms(buf[EC_REG_FAN_RPMS_HI], buf[EC_REG_FAN_RPMS_LO]);
+                    printf("[DEBUG] sysfs: cpu_temp=%d, gpu_temp=%d, fan_duty=%d, fan_rpms=%d\n", share_info->cpu_temp, share_info->gpu_temp, share_info->fan_duty, share_info->fan_rpms);
+                    break;
+                default:
+                    printf("[DEBUG] wrong EC size from sysfs: %ld\n", len);
+                    sysfs_available = 0;
+                }
+            }
         }
-        unsigned char buf[EC_REG_SIZE];
-        ssize_t len = read(io_fd, buf, EC_REG_SIZE);
-        switch (len) {
-        case -1:
-            printf("unable to read EC from sysfs: %s\n", strerror(errno));
-            break;
-        case 0x100:
-            share_info->cpu_temp = buf[EC_REG_CPU_TEMP];
-            share_info->gpu_temp = buf[EC_REG_GPU_TEMP];
-            share_info->fan_duty = calculate_fan_duty(buf[EC_REG_FAN_DUTY]);
-            share_info->fan_rpms = calculate_fan_rpms(buf[EC_REG_FAN_RPMS_HI],
-                    buf[EC_REG_FAN_RPMS_LO]);
-            /*
-             printf("temp=%d, duty=%d, rpms=%d\n", share_info->cpu_temp,
-             share_info->fan_duty, share_info->fan_rpms);
-             */
-            break;
-        default:
-            printf("wrong EC size from sysfs: %ld\n", len);
+        
+        // Fall back to direct I/O if sysfs is not available
+        if (!sysfs_available) {
+            printf("[DEBUG] Using direct I/O for EC access\n");
+            share_info->cpu_temp = ec_query_cpu_temp();
+            share_info->gpu_temp = ec_query_gpu_temp();
+            share_info->fan_duty = ec_query_fan_duty();
+            share_info->fan_rpms = ec_query_fan_rpms();
+            printf("[DEBUG] direct I/O: cpu_temp=%d, gpu_temp=%d, fan_duty=%d, fan_rpms=%d\n", share_info->cpu_temp, share_info->gpu_temp, share_info->fan_duty, share_info->fan_rpms);
         }
-        close(io_fd);
+        
         // auto EC
         if (share_info->auto_duty == 1) {
             int next_duty = ec_auto_duty_adjust();
+            printf("[DEBUG] auto_duty=1, next_duty=%d, prev_auto_duty_val=%d\n", next_duty, share_info->auto_duty_val);
             if (next_duty != 0 && next_duty != share_info->auto_duty_val) {
                 char s_time[256];
                 get_time_string(s_time, 256, "%m/%d %H:%M:%S");
-                printf("%s CPU=%d°C, GPU=%d°C, auto fan duty to %d%%\n", s_time,
-                        share_info->cpu_temp, share_info->gpu_temp, next_duty);
-                ec_write_fan_duty(next_duty);
+                printf("%s CPU=%d°C, GPU=%d°C, auto fan duty to %d%%\n", s_time, share_info->cpu_temp, share_info->gpu_temp, next_duty);
+                int write_result = ec_write_fan_duty(next_duty);
+                printf("[DEBUG] ec_write_fan_duty (auto) returned: %d\n", write_result);
                 share_info->auto_duty_val = next_duty;
             }
         }
         //
         usleep(200 * 1000);
     }
-    printf("worker quit\n");
+    printf("[DEBUG] Worker quit (share_info->exit=%d)\n", share_info->exit);
     return EXIT_SUCCESS;
 }
 
