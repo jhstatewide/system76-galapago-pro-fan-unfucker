@@ -47,7 +47,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <libappindicator/app-indicator.h>
+#include <libayatana-appindicator/app-indicator.h>
 
 #define NAME "clevo-indicator"
 
