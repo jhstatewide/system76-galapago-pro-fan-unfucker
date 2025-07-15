@@ -1,0 +1,28 @@
+[Unit]
+Description=Clevo Fan Control Indicator
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=notify
+User=%i
+Group=%i
+ExecStart=/usr/local/bin/clevo-indicator
+Restart=on-failure
+RestartSec=5
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/%i/.Xauthority
+
+# Capabilities for EC access
+AmbientCapabilities=CAP_SYS_RAWIO
+CapabilityBoundingSet=CAP_SYS_RAWIO
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/sys/kernel/debug/ec
+
+[Install]
+WantedBy=graphical-session.target 

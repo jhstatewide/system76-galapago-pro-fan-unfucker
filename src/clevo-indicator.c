@@ -48,6 +48,7 @@
 #include <unistd.h>
 
 #include <libayatana-appindicator/app-indicator.h>
+#include "privilege_manager.h"
 
 #define NAME "clevo-indicator"
 
@@ -107,6 +108,8 @@ static int check_proc_instances(const char* proc_name);
 static void get_time_string(char* buffer, size_t max, const char* format);
 static void signal_term(__sighandler_t handler);
 static void parse_command_line(int argc, char* argv[]);
+static bool setup_privileges(void);
+static void show_privilege_help(void);
 
 static AppIndicator* indicator = NULL;
 
@@ -169,6 +172,13 @@ int main(int argc, char* argv[]) {
         }
         return EXIT_FAILURE;
     }
+    // Setup privileges using modern methods
+    if (!setup_privileges()) {
+        printf("Failed to setup privileges for EC access\n");
+        return EXIT_FAILURE;
+    }
+    
+    // Test EC access
     if (ec_init() != EXIT_SUCCESS) {
         printf("unable to control EC: %s\n", strerror(errno));
         return EXIT_FAILURE;
@@ -634,15 +644,19 @@ Options:\n\
 Arguments:\n\
   [fan-duty-percentage]\tTarget fan duty in percentage, from 40 to 100\n\
 \n\
-Without arguments this program should attempt to display an indicator in\n\
-the Ubuntu tray area for fan information display and control. The indicator\n\
-requires this program to have setuid=root flag but run from the desktop user\n\
-, because a root user is not allowed to display a desktop indicator while a\n\
-non-root user is not allowed to control Clevo EC (Embedded Controller that's\n\
-responsible of the fan). Fix permissions of this executable if it fails to\n\
-run:\n\
-    sudo chown root clevo-indicator\n\
-    sudo chmod u+s  clevo-indicator\n\
+Modern Privilege Management:\n\
+This program now supports multiple privilege elevation methods:\n\
+\n\
+1. Capabilities (Recommended):\n\
+   sudo setcap cap_sys_rawio+ep bin/clevo-indicator\n\
+\n\
+2. Systemd Service (Background):\n\
+   sudo cp systemd/clevo-indicator.service /etc/systemd/user/\n\
+   systemctl --user enable clevo-indicator.service\n\
+\n\
+3. Traditional setuid:\n\
+   sudo chown root bin/clevo-indicator\n\
+   sudo chmod u+s bin/clevo-indicator\n\
 \n\
 Note any fan duty change should take 1-2 seconds to come into effect - you\n\
 can verify by the fan speed displayed on indicator icon and also louder fan\n\
@@ -659,4 +673,66 @@ DO NOT MANIPULATE OR QUERY EC I/O PORTS WHILE THIS PROGRAM IS RUNNING.\n\
             exit(EXIT_SUCCESS);
         }
     }
+}
+
+static bool setup_privileges(void) {
+    privilege_manager_init();
+    
+    privilege_status_t status = privilege_check_status();
+    privilege_method_t best_method = privilege_get_best_method();
+    
+    if (debug_mode) {
+        printf("[DEBUG] Current privilege status:\n");
+        printf("[DEBUG]   Effective UID: %d\n", status.effective_uid);
+        printf("[DEBUG]   Real UID: %d\n", status.real_uid);
+        printf("[DEBUG]   Has privileges: %s\n", status.has_privileges ? "yes" : "no");
+        printf("[DEBUG]   Best method: %s\n", privilege_method_name(best_method));
+    }
+    
+    if (status.has_privileges) {
+        if (debug_mode) printf("[DEBUG] Already have privileges\n");
+        return true;
+    }
+    
+    if (best_method == PRIV_METHOD_NONE) {
+        printf("No privilege elevation method available.\n");
+        show_privilege_help();
+        return false;
+    }
+    
+    if (debug_mode) printf("[DEBUG] Attempting to elevate privileges using %s\n", privilege_method_name(best_method));
+    
+    if (!privilege_elevate()) {
+        printf("Failed to elevate privileges: %s\n", 
+               status.error_message ? status.error_message : "unknown error");
+        show_privilege_help();
+        return false;
+    }
+    
+    if (debug_mode) printf("[DEBUG] Successfully elevated privileges\n");
+    return true;
+}
+
+static void show_privilege_help(void) {
+    printf("\nPrivilege Setup Options:\n");
+    printf("========================\n\n");
+    
+    printf("1. Capabilities (Recommended):\n");
+    printf("   sudo setcap cap_sys_rawio+ep bin/clevo-indicator\n\n");
+    
+    printf("2. Systemd Service (Background):\n");
+    printf("   sudo cp systemd/clevo-indicator.service /etc/systemd/user/\n");
+    printf("   systemctl --user enable clevo-indicator.service\n");
+    printf("   systemctl --user start clevo-indicator.service\n\n");
+    
+    printf("3. Setuid (Traditional):\n");
+    printf("   sudo chown root bin/clevo-indicator\n");
+    printf("   sudo chmod u+s bin/clevo-indicator\n\n");
+    
+    printf("4. Polkit Policy (Modern):\n");
+    printf("   sudo cp polkit/org.freedesktop.policykit.clevo-indicator.policy /usr/share/polkit-1/actions/\n");
+    printf("   sudo systemctl reload polkit\n\n");
+    
+    printf("5. Sudoers (Alternative):\n");
+    printf("   echo '%%sudo ALL=(ALL) NOPASSWD: /usr/local/bin/clevo-indicator' | sudo tee /etc/sudoers.d/clevo-indicator\n\n");
 }
