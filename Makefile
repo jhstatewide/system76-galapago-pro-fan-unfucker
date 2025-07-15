@@ -23,6 +23,11 @@ install: $(TARGET)
 	@sudo install -m 4750 -g adm $(TARGET) ${DSTDIR}/bin/
 
 test: $(TARGET)
+	@echo "Running unit tests..."
+	@chmod +x tests/run_tests.sh
+	@./tests/run_tests.sh
+
+test-permissions: $(TARGET)
 	@sudo chown root $(TARGET)
 	@sudo chgrp adm  $(TARGET)
 	@sudo chmod 4750 $(TARGET)
