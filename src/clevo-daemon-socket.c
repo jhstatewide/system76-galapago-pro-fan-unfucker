@@ -61,7 +61,6 @@ static pthread_t socket_thread;
 static void* socket_server_thread(void* arg);
 static int handle_client_command(int client_sock, const char* command);
 static int send_response(int client_sock, const char* response);
-static void cleanup_socket(void);
 static void socket_signal_handler(int sig);
 
 int init_socket_server(void) {

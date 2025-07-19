@@ -450,7 +450,9 @@ static int check_proc_instances(const char* proc_name) {
         if (ent->d_type == DT_DIR && isdigit(ent->d_name[0])) {
             char path[512];
             char comm[256];
-            snprintf(path, sizeof(path), "/proc/%s/comm", ent->d_name);
+            if (snprintf(path, sizeof(path), "/proc/%s/comm", ent->d_name) >= (int)sizeof(path)) {
+                continue; // Skip if path would be truncated
+            }
             FILE* f = fopen(path, "r");
             if (f != NULL) {
                 if (fgets(comm, sizeof(comm), f) != NULL) {
