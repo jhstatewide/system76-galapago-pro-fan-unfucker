@@ -39,6 +39,7 @@
 #include <ctype.h>
 
 #include "privilege_manager.h"
+#include "clevo-daemon-socket.h"
 
 #define NAME "clevo-daemon"
 
@@ -153,6 +154,12 @@ int main(int argc, char* argv[]) {
         signal_term(&daemon_on_sigterm);
         daemon_init_share();
         
+        // Initialize socket server
+        if (init_socket_server() != 0) {
+            daemon_log(LOG_ERR, "Failed to initialize socket server");
+            return EXIT_FAILURE;
+        }
+        
         daemon_log(LOG_INFO, "Starting fan control daemon with target temperature %d°C", target_temperature);
         
         // Run the main daemon loop
@@ -160,6 +167,9 @@ int main(int argc, char* argv[]) {
             daemon_ec_worker();
             usleep(status_interval * 1000000); // Convert to microseconds
         }
+        
+        // Stop socket server
+        stop_socket_server();
         
         daemon_log(LOG_INFO, "Daemon stopped");
     } else {

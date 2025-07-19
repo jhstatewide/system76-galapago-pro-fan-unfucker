@@ -9,12 +9,15 @@ OBJDIR := obj
 SRCDIR := src
 
 SRC = clevo-indicator.c privilege_manager.c
-DAEMON_SRC = clevo-daemon.c privilege_manager.c
+DAEMON_SRC = clevo-daemon.c clevo-daemon-socket.c privilege_manager.c
+CLIENT_SRC = clevo-client.c
 OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(SRC))
 DAEMON_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(DAEMON_SRC))
+CLIENT_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(CLIENT_SRC))
 
 TARGET = bin/clevo-indicator
 DAEMON_TARGET = bin/clevo-daemon
+CLIENT_TARGET = bin/clevo-client
 
 PKG_CONFIG ?= pkg-config
 
@@ -33,12 +36,13 @@ endif
 UI_CFLAGS = `pkg-config --cflags ayatana-appindicator3-0.1`
 UI_LDFLAGS = `pkg-config --libs ayatana-appindicator3-0.1`
 
-all: $(TARGET) $(DAEMON_TARGET)
+all: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
 
-install: $(TARGET) $(DAEMON_TARGET)
+install: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
 	@echo Install to ${DSTDIR}/bin/
 	@sudo install -m 4750 -g adm $(TARGET) ${DSTDIR}/bin/
 	@sudo install -m 4750 -g adm $(DAEMON_TARGET) ${DSTDIR}/bin/
+	@sudo install -m 755 $(CLIENT_TARGET) ${DSTDIR}/bin/
 
 install-capabilities: $(TARGET) $(DAEMON_TARGET)
 	@echo Installing with capabilities...
@@ -82,10 +86,15 @@ $(TARGET): $(OBJ) Makefile
 $(DAEMON_TARGET): $(DAEMON_OBJ) Makefile
 	@mkdir -p bin
 	@echo linking $(DAEMON_TARGET) from $(DAEMON_OBJ)
-	@$(CC) $(DAEMON_OBJ) -o $(DAEMON_TARGET) $(LDFLAGS) -lm
+	@$(CC) $(DAEMON_OBJ) -o $(DAEMON_TARGET) $(LDFLAGS) -lm -lpthread
+
+$(CLIENT_TARGET): $(CLIENT_OBJ) Makefile
+	@mkdir -p bin
+	@echo linking $(CLIENT_TARGET) from $(CLIENT_OBJ)
+	@$(CC) $(CLIENT_OBJ) -o $(CLIENT_TARGET) $(LDFLAGS) -lm
 
 clean:
-	rm -f $(OBJ) $(DAEMON_OBJ) $(TARGET) $(DAEMON_TARGET)
+	rm -f $(OBJ) $(DAEMON_OBJ) $(CLIENT_OBJ) $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
 
 $(OBJDIR)/%.o : $(SRCDIR)/%.c Makefile
 	@echo compiling $< 
