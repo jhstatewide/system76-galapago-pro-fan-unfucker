@@ -32,11 +32,13 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <time.h>
 #include <syslog.h>
 #include <stdarg.h>
 #include <ctype.h>
+#include <getopt.h>
 
 #include "privilege_manager.h"
 #include "clevo-daemon-socket.h"
@@ -72,9 +74,10 @@
 
 // Global variables
 static int debug_mode = 0;
-static int status_interval = 2; // Default 2 seconds
-static int target_temperature = 65; // Default target temperature
 static int log_level = LOG_INFO;
+static int status_interval = 2;
+static int target_temperature = 65;
+static int daemon_mode = 0;
 static volatile int running = 1;
 
 // Shared memory structure
@@ -115,6 +118,7 @@ static void parse_command_line(int argc, char* argv[]);
 static bool setup_privileges(void);
 static void show_privilege_help(void);
 static void daemon_log(int priority, const char* format, ...);
+static void daemonize(void);
 
 int main(int argc, char* argv[]) {
     printf("Clevo Fan Control Daemon\n");
@@ -140,19 +144,22 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     
-    // Find the first non-option argument
+    // Check for remaining arguments after option processing
     int fan_duty_arg = -1;
-    for (int i = 1; i < argc; i++) {
-        if (argv[i][0] != '-') {
-            fan_duty_arg = i;
-            break;
-        }
+    if (optind < argc) {
+        fan_duty_arg = optind;
     }
     
-    if (fan_duty_arg == -1) {
-        // No fan duty argument provided - run daemon mode
+    // If no non-option argument and daemon_mode is set (or no fan duty arg), run in daemon mode
+    if (fan_duty_arg == -1 || daemon_mode) {
+        // Run daemon mode
         signal_term(&daemon_on_sigterm);
         daemon_init_share();
+        
+        // Daemonize if not in debug mode
+        if (!debug_mode) {
+            daemonize();
+        }
         
         // Initialize socket server
         if (init_socket_server() != 0) {
@@ -186,6 +193,11 @@ int main(int argc, char* argv[]) {
             signal_term(&daemon_on_sigterm);
             daemon_init_share();
             
+            // Daemonize if not in debug mode
+            if (!debug_mode) {
+                daemonize();
+            }
+            
             // Initialize socket server
             if (init_socket_server() != 0) {
                 daemon_log(LOG_ERR, "Failed to initialize socket server");
@@ -208,7 +220,7 @@ int main(int argc, char* argv[]) {
             printf("Invalid argument: %s\n", argv[fan_duty_arg]);
             printf("For fan duty (CLI mode): must be 1-100\n");
             printf("For target temperature (daemon mode): must be 40-100°C\n");
-            printf("For daemon mode with default temperature: no arguments\n");
+            printf("For daemon mode with default temperature: no arguments or --daemon\n");
             return EXIT_FAILURE;
         }
     }
@@ -484,68 +496,94 @@ static void signal_term(__sighandler_t handler) {
 }
 
 static void parse_command_line(int argc, char* argv[]) {
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--debug") == 0) {
-            debug_mode = 1;
-            log_level = LOG_DEBUG;
-        } else if (strcmp(argv[i], "--interval") == 0 && i + 1 < argc) {
-            status_interval = atoi(argv[++i]);
-            if (status_interval < 1 || status_interval > 60) {
-                printf("Invalid interval: %d (must be 1-60 seconds)\n", status_interval);
+    static struct option long_options[] = {
+        {"debug",        no_argument,       0, 'd'},
+        {"interval",     required_argument, 0, 'i'},
+        {"target-temp",  required_argument, 0, 't'},
+        {"daemon",       no_argument,       0, 'D'},
+        {"help",         no_argument,       0, 'h'},
+        {0, 0, 0, 0}
+    };
+    
+    int option_index = 0;
+    int c;
+    
+    while ((c = getopt_long(argc, argv, "di:t:Dh?", long_options, &option_index)) != -1) {
+        switch (c) {
+            case 'd':
+                debug_mode = 1;
+                log_level = LOG_DEBUG;
+                break;
+            case 'i':
+                status_interval = atoi(optarg);
+                if (status_interval < 1 || status_interval > 60) {
+                    printf("Invalid interval: %d (must be 1-60 seconds)\n", status_interval);
+                    exit(EXIT_FAILURE);
+                }
+                break;
+            case 't':
+                target_temperature = atoi(optarg);
+                if (target_temperature < 40 || target_temperature > 100) {
+                    printf("Invalid target temperature: %d (must be 40-100°C)\n", target_temperature);
+                    exit(EXIT_FAILURE);
+                }
+                break;
+            case 'D':
+                daemon_mode = 1;
+                break;
+            case 'h':
+            case '?':
+                printf(
+                    "\n"
+                    "Usage: clevo-daemon [OPTIONS] [fan-duty-percentage|target-temperature]\n"
+                    "\n"
+                    "Headless fan control daemon for Clevo laptops.\n"
+                    "\n"
+                    "Options:\n"
+                    "  -d, --debug\t\tEnable debug output (prevents daemonization)\n"
+                    "  -i, --interval <sec>\tSet status update interval (1-60 seconds, default: 2)\n"
+                    "  -t, --target-temp <°C>\tSet the target temperature for auto fan control (40-100°C, default: 65)\n"
+                    "  -D, --daemon\t\tExplicitly run in daemon mode (default behavior)\n"
+                    "  -h, -?, --help\tDisplay this help and exit\n"
+                    "\n"
+                    "Modes:\n"
+                    "  Daemon Mode (default):\n"
+                    "    - No arguments: Run daemon with default target temperature (65°C)\n"
+                    "    - --target-temp N: Run daemon with target temperature N°C\n"
+                    "    - --daemon: Explicitly run in daemon mode\n"
+                    "    - Temperature argument (40-100): Run daemon with that target temperature\n"
+                    "\n"
+                    "  CLI Mode:\n"
+                    "    - Fan duty argument (1-100): Set fan to that percentage and exit\n"
+                    "\n"
+                    "Examples:\n"
+                    "  ./clevo-daemon                    # Daemon mode, target 65°C\n"
+                    "  ./clevo-daemon --target-temp 55   # Daemon mode, target 55°C\n"
+                    "  ./clevo-daemon 55                 # Daemon mode, target 55°C\n"
+                    "  ./clevo-daemon 50                 # CLI mode, set fan to 50%%\n"
+                    "  ./clevo-daemon --debug            # Daemon mode with debug output\n"
+                    "\n"
+                    "Modern Privilege Management:\n"
+                    "This program supports multiple privilege elevation methods:\n"
+                    "\n"
+                    "1. Capabilities (Recommended):\n"
+                    "   sudo setcap cap_sys_rawio+ep bin/clevo-daemon\n"
+                    "\n"
+                    "2. Systemd Service (Background):\n"
+                    "   sudo cp systemd/clevo-daemon.service /etc/systemd/system/\n"
+                    "   sudo systemctl enable clevo-daemon.service\n"
+                    "\n"
+                    "3. Traditional setuid:\n"
+                    "   sudo chown root bin/clevo-daemon\n"
+                    "   sudo chmod u+s bin/clevo-daemon\n"
+                    "\n"
+                    "Note any fan duty change should take 1-2 seconds to come into effect.\n"
+                    "\n"
+                );
+                exit(EXIT_SUCCESS);
+            default:
+                printf("Unknown option: %c\n", c);
                 exit(EXIT_FAILURE);
-            }
-        } else if (strcmp(argv[i], "--target-temp") == 0 && i + 1 < argc) {
-            target_temperature = atoi(argv[++i]);
-            if (target_temperature < 40 || target_temperature > 100) {
-                printf("Invalid target temperature: %d (must be 40-100°C)\n", target_temperature);
-                exit(EXIT_FAILURE);
-            }
-        } else if (strcmp(argv[i], "-?") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf(
-                "\n"
-                "Usage: clevo-daemon [OPTIONS] [fan-duty-percentage|target-temperature]\n"
-                "\n"
-                "Headless fan control daemon for Clevo laptops.\n"
-                "\n"
-                "Options:\n"
-                "  --debug\t\tEnable debug output\n"
-                "  --interval <sec>\tSet status update interval (1-60 seconds, default: 2)\n"
-                "  --target-temp <°C>\tSet the target temperature for auto fan control (40-100°C, default: 65)\n"
-                "  -?, --help\t\tDisplay this help and exit\n"
-                "\n"
-                "Arguments:\n"
-                "  [fan-duty-percentage]\tTarget fan duty in percentage, from 1 to 100 (CLI mode)\n"
-                "  [target-temperature]\tTarget temperature in °C, from 40 to 100 (Daemon mode)\n"
-                "\n"
-                "Daemon Mode:\n"
-                "  When run without arguments, operates as a daemon with automatic\n"
-                "  temperature-based fan control using default target temperature (65°C).\n"
-                "  \n"
-                "  When run with a temperature argument (40-100°C), operates as a daemon\n"
-                "  with the specified target temperature for automatic fan control.\n"
-                "\n"
-                "CLI Mode:\n"
-                "  When a fan duty percentage (1-100) is provided, sets the fan to that\n"
-                "  percentage and displays current status.\n"
-                "\n"
-                "Modern Privilege Management:\n"
-                "This program supports multiple privilege elevation methods:\n"
-                "\n"
-                "1. Capabilities (Recommended):\n"
-                "   sudo setcap cap_sys_rawio+ep bin/clevo-daemon\n"
-                "\n"
-                "2. Systemd Service (Background):\n"
-                "   sudo cp systemd/clevo-daemon.service /etc/systemd/system/\n"
-                "   sudo systemctl enable clevo-daemon.service\n"
-                "\n"
-                "3. Traditional setuid:\n"
-                "   sudo chown root bin/clevo-daemon\n"
-                "   sudo chmod u+s bin/clevo-daemon\n"
-                "\n"
-                "Note any fan duty change should take 1-2 seconds to come into effect.\n"
-                "\n"
-            );
-            exit(EXIT_SUCCESS);
         }
     }
 }
@@ -594,4 +632,45 @@ static void daemon_log(int priority, const char* format, ...) {
     }
     
     va_end(args);
+} 
+
+static void daemonize(void) {
+    pid_t pid = fork();
+    
+    if (pid < 0) {
+        daemon_log(LOG_ERR, "Failed to fork daemon process");
+        exit(EXIT_FAILURE);
+    }
+    
+    if (pid > 0) {
+        // Parent process - exit
+        exit(EXIT_SUCCESS);
+    }
+    
+    // Child process continues
+    umask(0);
+    
+    // Create new session
+    if (setsid() < 0) {
+        daemon_log(LOG_ERR, "Failed to create new session");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Change to root directory
+    if (chdir("/") < 0) {
+        daemon_log(LOG_ERR, "Failed to change to root directory");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Close standard file descriptors
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+    
+    // Redirect to /dev/null
+    open("/dev/null", O_RDONLY);
+    open("/dev/null", O_WRONLY);
+    open("/dev/null", O_WRONLY);
+    
+    daemon_log(LOG_INFO, "Daemon started with PID %d", getpid());
 } 
