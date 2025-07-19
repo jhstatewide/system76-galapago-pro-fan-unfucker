@@ -35,6 +35,7 @@ typedef enum {
     CMD_SET_TARGET_TEMP,
     CMD_GET_TEMP,
     CMD_GET_FAN,
+    CMD_TEMP_MONITOR,
     CMD_HELP
 } CommandType;
 
@@ -42,7 +43,7 @@ typedef struct {
     CommandType type;
     int fan_duty;
     int target_temperature;
-    int monitor_interval;
+    double monitor_interval;
     int verbose;
     int json_output;
 } ClientConfig;
@@ -156,8 +157,75 @@ int main(int argc, char* argv[]) {
                 if (send_command(sock, command) == 0) {
                     char response[BUFFER_SIZE];
                     if (receive_response(sock, response, sizeof(response)) == 0) {
-                        printf("Temperature: %s\n", response);
+                        int cpu_temp, gpu_temp;
+                        if (sscanf(response, "CPU:%d GPU:%d", &cpu_temp, &gpu_temp) == 2) {
+                            printf("Current Temperatures:\n");
+                            printf("  CPU: %d°C\n", cpu_temp);
+                            printf("  GPU: %d°C\n", gpu_temp);
+                            
+                            // Temperature status
+                            int max_temp = (cpu_temp > gpu_temp) ? cpu_temp : gpu_temp;
+                            if (max_temp >= 80) {
+                                printf("  Status: \033[31mCRITICAL\033[0m (Consider reducing load)\n");
+                            } else if (max_temp >= 70) {
+                                printf("  Status: \033[33mHIGH\033[0m (Monitor closely)\n");
+                            } else if (max_temp >= 60) {
+                                printf("  Status: \033[36mWARM\033[0m (Normal under load)\n");
+                            } else {
+                                printf("  Status: \033[32mNORMAL\033[0m (Good)\n");
+                            }
+                        } else {
+                            printf("Temperature: %s\n", response);
+                        }
                     }
+                }
+            }
+            break;
+            
+        case CMD_TEMP_MONITOR:
+            {
+                printf("Temperature Monitor - Press Ctrl+C to exit\n");
+                printf("Time\t\tCPU\tGPU\tStatus\n");
+                printf("----\t\t---\t---\t------\n");
+                
+                while (running) {
+                    char command[64];
+                    snprintf(command, sizeof(command), "GET_TEMP");
+                    if (send_command(sock, command) == 0) {
+                        char response[BUFFER_SIZE];
+                        if (receive_response(sock, response, sizeof(response)) == 0) {
+                            int cpu_temp, gpu_temp;
+                            if (sscanf(response, "CPU:%d GPU:%d", &cpu_temp, &gpu_temp) == 2) {
+                                time_t now = time(NULL);
+                                struct tm *tm_info = localtime(&now);
+                                char time_str[20];
+                                strftime(time_str, sizeof(time_str), "%H:%M:%S", tm_info);
+                                
+                                // Determine status color and message
+                                const char* status_color = "";
+                                const char* status_msg = "";
+                                int max_temp = (cpu_temp > gpu_temp) ? cpu_temp : gpu_temp;
+                                
+                                if (max_temp >= 80) {
+                                    status_color = "\033[31m";  // Red
+                                    status_msg = "CRITICAL";
+                                } else if (max_temp >= 70) {
+                                    status_color = "\033[33m";  // Yellow
+                                    status_msg = "HIGH";
+                                } else if (max_temp >= 60) {
+                                    status_color = "\033[36m";  // Cyan
+                                    status_msg = "WARM";
+                                } else {
+                                    status_color = "\033[32m";  // Green
+                                    status_msg = "NORMAL";
+                                }
+                                
+                                printf("%s\t%d°C\t%d°C\t%s%s\033[0m\n", 
+                                       time_str, cpu_temp, gpu_temp, status_color, status_msg);
+                            }
+                        }
+                    }
+                    usleep((int)(config.monitor_interval * 1000000));
                 }
             }
             break;
@@ -233,11 +301,36 @@ static void print_status(const char* response) {
                 &cpu_temp, &gpu_temp, &fan_duty, &fan_rpm, &auto_mode) == 5) {
         
         printf("\n=== Clevo Fan Control Status ===\n");
-        printf("CPU Temperature: %d°C\n", cpu_temp);
-        printf("GPU Temperature: %d°C\n", gpu_temp);
-        printf("Fan Duty Cycle:  %d%%\n", fan_duty);
-        printf("Fan RPM:         %d\n", fan_rpm);
-        printf("Auto Mode:       %s\n", auto_mode ? "ON" : "OFF");
+        
+        // Temperature section with color coding
+        printf("Temperatures:\n");
+        const char* cpu_color = (cpu_temp >= 80) ? "\033[31m" : 
+                               (cpu_temp >= 70) ? "\033[33m" : 
+                               (cpu_temp >= 60) ? "\033[36m" : "\033[32m";
+        const char* gpu_color = (gpu_temp >= 80) ? "\033[31m" : 
+                               (gpu_temp >= 70) ? "\033[33m" : 
+                               (gpu_temp >= 60) ? "\033[36m" : "\033[32m";
+        
+        printf("  CPU: %s%d°C\033[0m\n", cpu_color, cpu_temp);
+        printf("  GPU: %s%d°C\033[0m\n", gpu_color, gpu_temp);
+        
+        // Temperature status
+        int max_temp = (cpu_temp > gpu_temp) ? cpu_temp : gpu_temp;
+        const char* status_color = (max_temp >= 80) ? "\033[31m" : 
+                                  (max_temp >= 70) ? "\033[33m" : 
+                                  (max_temp >= 60) ? "\033[36m" : "\033[32m";
+        const char* status_msg = (max_temp >= 80) ? "CRITICAL" : 
+                                (max_temp >= 70) ? "HIGH" : 
+                                (max_temp >= 60) ? "WARM" : "NORMAL";
+        
+        printf("  Status: %s%s\033[0m\n", status_color, status_msg);
+        
+        // Fan section
+        printf("\nFan Control:\n");
+        printf("  Duty Cycle: %d%%\n", fan_duty);
+        printf("  RPM:        %d\n", fan_rpm);
+        printf("  Auto Mode:  %s\n", auto_mode ? "ON" : "OFF");
+        
         printf("===============================\n\n");
     } else {
         printf("Status: %s\n", response);
@@ -267,7 +360,7 @@ static void monitor_loop(int sock) {
             }
         }
         
-        sleep(config.monitor_interval);
+                        usleep((int)(config.monitor_interval * 1000000));
     }
 }
 
@@ -281,12 +374,13 @@ static void print_help(void) {
     printf("Usage: clevo-client [OPTIONS] COMMAND\n\n");
     printf("Commands:\n");
     printf("  status              Show current fan control status\n");
-    printf("  monitor [INTERVAL]  Continuously monitor status (default: 2s)\n");
+    printf("  monitor [INTERVAL]  Continuously monitor status (default: 2.0s)\n");
     printf("  set-fan DUTY        Set fan duty cycle (1-100%%)\n");
     printf("  set-auto            Enable automatic fan control\n");
     printf("  set-target-temp TEMP Set target temperature for auto control (40-100°C)\n");
     printf("  get-temp            Get current temperatures\n");
     printf("  get-fan             Get current fan status\n");
+    printf("  temp-monitor [INTERVAL] Monitor temperatures continuously (default: 2.0s)\n");
     printf("  help                Show this help message\n\n");
     printf("Options:\n");
     printf("  -v, --verbose       Enable verbose output\n");
@@ -337,10 +431,10 @@ static void parse_arguments(int argc, char* argv[]) {
         config.type = CMD_STATUS;
     } else if (strcmp(command, "monitor") == 0) {
         config.type = CMD_MONITOR;
-        config.monitor_interval = 2; // Default 2 seconds
+        config.monitor_interval = 2.0; // Default 2 seconds
         if (optind + 1 < argc) {
-            config.monitor_interval = atoi(argv[optind + 1]);
-            if (config.monitor_interval < 1) config.monitor_interval = 1;
+            config.monitor_interval = atof(argv[optind + 1]);
+            if (config.monitor_interval < 0.1) config.monitor_interval = 0.1;
         }
     } else if (strcmp(command, "set-fan") == 0) {
         config.type = CMD_SET_FAN;
@@ -372,6 +466,13 @@ static void parse_arguments(int argc, char* argv[]) {
         config.type = CMD_GET_TEMP;
     } else if (strcmp(command, "get-fan") == 0) {
         config.type = CMD_GET_FAN;
+    } else if (strcmp(command, "temp-monitor") == 0) {
+        config.type = CMD_TEMP_MONITOR;
+        config.monitor_interval = 2.0; // Default 2 seconds
+        if (optind + 1 < argc) {
+            config.monitor_interval = atof(argv[optind + 1]);
+            if (config.monitor_interval < 0.1) config.monitor_interval = 0.1;
+        }
     } else if (strcmp(command, "help") == 0) {
         config.type = CMD_HELP;
     } else {

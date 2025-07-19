@@ -75,10 +75,41 @@
 // Global variables
 static int debug_mode = 0;
 static int log_level = LOG_INFO;
-static int status_interval = 2;
+static double status_interval = 2.0;
 static int target_temperature = 65;
 static int daemon_mode = 0;
 static volatile int running = 1;
+
+// PID Controller variables
+static double pid_kp = 2.0;  // Proportional gain
+static double pid_ki = 0.1;  // Integral gain  
+static double pid_kd = 0.5;  // Derivative gain
+static double pid_integral = 0.0;
+static double pid_prev_error = 0.0;
+static double pid_output_min = 0.0;
+static double pid_output_max = 100.0;
+static int pid_enabled = 1;  // Enable PID control by default
+
+// Adaptive PID Controller variables
+static int adaptive_pid_enabled = 1;  // Enable adaptive tuning
+static int adaptive_learning_cycles = 0;  // Number of learning cycles completed
+static double adaptive_performance_score = 0.0;  // Current performance score
+static double adaptive_prev_score = 0.0;  // Previous performance score
+static double adaptive_oscillation_penalty = 0.0;  // Penalty for oscillation
+static double adaptive_overshoot_penalty = 0.0;  // Penalty for overshoot
+static double adaptive_settling_time = 0.0;  // Time to reach target
+static int adaptive_cycle_start_time = 0;  // Start time of current cycle
+static int adaptive_cycle_count = 0;  // Cycles since last tuning
+static double adaptive_temp_history[60];  // Temperature history for analysis
+static int adaptive_temp_history_index = 0;  // Current index in history
+static int adaptive_temp_history_size = 0;  // Number of samples in history
+
+// Adaptive tuning parameters
+static double adaptive_kp_step = 0.1;  // Step size for Kp adjustments
+static double adaptive_ki_step = 0.01;  // Step size for Ki adjustments  
+static double adaptive_kd_step = 0.05;  // Step size for Kd adjustments
+static int adaptive_tuning_interval = 30;  // Tuning interval in seconds
+static double adaptive_target_performance = 0.8;  // Target performance score
 
 // Shared memory structure
 struct {
@@ -119,6 +150,14 @@ static bool setup_privileges(void);
 static void show_privilege_help(void);
 static void daemon_log(int priority, const char* format, ...);
 static void daemonize(void);
+
+// Adaptive PID Controller functions
+static void adaptive_pid_add_temp_history(int temp);
+static double adaptive_pid_calculate_oscillation(void);
+static double adaptive_pid_calculate_performance_score(void);
+static void adaptive_pid_tune_parameters(void);
+static void adaptive_pid_reset(void);
+static void pid_reset(void);
 
 int main(int argc, char* argv[]) {
     printf("Clevo Fan Control Daemon\n");
@@ -172,7 +211,7 @@ int main(int argc, char* argv[]) {
         // Run the main daemon loop
         while (running) {
             daemon_ec_worker();
-            usleep(status_interval * 1000000); // Convert to microseconds
+            usleep((int)(status_interval * 1000000)); // Convert to microseconds
         }
         
         // Stop socket server
@@ -209,7 +248,7 @@ int main(int argc, char* argv[]) {
             // Run the main daemon loop
             while (running) {
                 daemon_ec_worker();
-                usleep(status_interval * 1000000); // Convert to microseconds
+                usleep((int)(status_interval * 1000000)); // Convert to microseconds
             }
             
             // Stop socket server
@@ -351,25 +390,79 @@ static int ec_init(void) {
 }
 
 static int ec_auto_duty_adjust(void) {
+    if (!pid_enabled) {
+        // Fall back to simple control if PID is disabled
+        int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+        int duty = share_info->fan_duty;
+        int new_duty = duty;
+
+        if (temp >= target_temperature) {
+            new_duty = MAX(duty + 2, 10);
+        } else {
+            new_duty = MAX(duty - 2, 0);
+        }
+
+        if (new_duty > 100) {
+            new_duty = 100;
+        } else if (new_duty < 0) {
+            new_duty = 0;
+        }
+
+        return new_duty;
+    }
+
+    // PID Controller implementation
     int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
-    int duty = share_info->fan_duty;
-    int new_duty = duty;
-
-    if (temp >= target_temperature) {
-        // Gradually increase fan duty cycle to find steady state
-        new_duty = MAX(duty + 2, 10);
+    double setpoint = (double)target_temperature;
+    double process_variable = (double)temp;
+    double error = process_variable - setpoint;
+    
+    // Add temperature to history for adaptive tuning
+    if (adaptive_pid_enabled) {
+        adaptive_pid_add_temp_history(temp);
+        adaptive_cycle_count++;
+        
+        // Perform adaptive tuning at intervals
+        if (adaptive_cycle_count >= adaptive_tuning_interval) {
+            adaptive_pid_tune_parameters();
+            adaptive_cycle_count = 0;
+        }
     }
-    else {
-        // Decrease fan duty cycle if temperature is below target
-        new_duty = MAX(duty - 2, 0);
+    
+    // Calculate PID terms
+    double proportional = pid_kp * error;
+    
+    // Integral term with anti-windup
+    pid_integral += error;
+    if (pid_integral > 100.0) pid_integral = 100.0;
+    if (pid_integral < -100.0) pid_integral = -100.0;
+    double integral = pid_ki * pid_integral;
+    
+    // Derivative term
+    double derivative = pid_kd * (error - pid_prev_error);
+    
+    // Calculate PID output
+    double output = proportional + integral + derivative;
+    
+    // Clamp output to valid range
+    if (output > pid_output_max) output = pid_output_max;
+    if (output < pid_output_min) output = pid_output_min;
+    
+    // Store error for next iteration
+    pid_prev_error = error;
+    
+    // Convert to integer duty cycle
+    int new_duty = (int)(output + 0.5); // Round to nearest integer
+    
+    // Ensure duty cycle is within valid range
+    if (new_duty > 100) new_duty = 100;
+    if (new_duty < 0) new_duty = 0;
+    
+    if (debug_mode) {
+        daemon_log(LOG_DEBUG, "PID: temp=%d, setpoint=%.1f, error=%.1f, p=%.1f, i=%.1f, d=%.1f, output=%.1f, duty=%d",
+               temp, setpoint, error, proportional, integral, derivative, output, new_duty);
     }
-
-    if (new_duty > 100) {
-        new_duty = 100;
-    } else if (new_duty < 0) {
-        new_duty = 0;
-    }
-
+    
     return new_duty;
 }
 
@@ -501,6 +594,10 @@ static void parse_command_line(int argc, char* argv[]) {
         {"interval",     required_argument, 0, 'i'},
         {"target-temp",  required_argument, 0, 't'},
         {"daemon",       no_argument,       0, 'D'},
+        {"pid-enabled",  required_argument, 0, 'p'},
+        {"adaptive-pid", required_argument, 0, 'a'},
+        {"adaptive-tuning-interval", required_argument, 0, 'A'},
+        {"adaptive-target-performance", required_argument, 0, 'P'},
         {"help",         no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
@@ -508,16 +605,16 @@ static void parse_command_line(int argc, char* argv[]) {
     int option_index = 0;
     int c;
     
-    while ((c = getopt_long(argc, argv, "di:t:Dh?", long_options, &option_index)) != -1) {
+    while ((c = getopt_long(argc, argv, "di:t:Dp:a:A:P:h?", long_options, &option_index)) != -1) {
         switch (c) {
             case 'd':
                 debug_mode = 1;
                 log_level = LOG_DEBUG;
                 break;
             case 'i':
-                status_interval = atoi(optarg);
-                if (status_interval < 1 || status_interval > 60) {
-                    printf("Invalid interval: %d (must be 1-60 seconds)\n", status_interval);
+                status_interval = atof(optarg);
+                if (status_interval < 0.1 || status_interval > 60.0) {
+                    printf("Invalid interval: %.1f (must be 0.1-60.0 seconds)\n", status_interval);
                     exit(EXIT_FAILURE);
                 }
                 break;
@@ -531,6 +628,22 @@ static void parse_command_line(int argc, char* argv[]) {
             case 'D':
                 daemon_mode = 1;
                 break;
+            case 'p':
+                pid_enabled = atoi(optarg);
+                break;
+            case 'a':
+                adaptive_pid_enabled = atoi(optarg);
+                break;
+            case 'A':
+                adaptive_tuning_interval = atoi(optarg);
+                if (adaptive_tuning_interval < 10) adaptive_tuning_interval = 10;
+                if (adaptive_tuning_interval > 300) adaptive_tuning_interval = 300;
+                break;
+            case 'P':
+                adaptive_target_performance = atof(optarg);
+                if (adaptive_target_performance < 0.1) adaptive_target_performance = 0.1;
+                if (adaptive_target_performance > 1.0) adaptive_target_performance = 1.0;
+                break;
             case 'h':
             case '?':
                 printf(
@@ -541,9 +654,13 @@ static void parse_command_line(int argc, char* argv[]) {
                     "\n"
                     "Options:\n"
                     "  -d, --debug\t\tEnable debug output (prevents daemonization)\n"
-                    "  -i, --interval <sec>\tSet status update interval (1-60 seconds, default: 2)\n"
+                    "  -i, --interval <sec>\tSet status update interval (0.1-60.0 seconds, default: 2.0)\n"
                     "  -t, --target-temp <°C>\tSet the target temperature for auto fan control (40-100°C, default: 65)\n"
                     "  -D, --daemon\t\tExplicitly run in daemon mode (default behavior)\n"
+                    "  -p, --pid-enabled <0|1>\tEnable/Disable PID control (default: 1)\n"
+                    "  -a, --adaptive-pid <0|1>\tEnable/Disable adaptive PID tuning (default: 1)\n"
+                    "  -A, --adaptive-tuning-interval <sec>\tSet adaptive tuning interval (10-300s, default: 30)\n"
+                    "  -P, --adaptive-target-performance <value>\tSet target performance score (0.1-1.0, default: 0.8)\n"
                     "  -h, -?, --help\tDisplay this help and exit\n"
                     "\n"
                     "Modes:\n"
@@ -636,41 +753,167 @@ static void daemon_log(int priority, const char* format, ...) {
 
 static void daemonize(void) {
     pid_t pid = fork();
-    
     if (pid < 0) {
-        daemon_log(LOG_ERR, "Failed to fork daemon process");
         exit(EXIT_FAILURE);
     }
-    
     if (pid > 0) {
-        // Parent process - exit
         exit(EXIT_SUCCESS);
     }
     
-    // Child process continues
     umask(0);
     
-    // Create new session
-    if (setsid() < 0) {
-        daemon_log(LOG_ERR, "Failed to create new session");
+    pid_t sid = setsid();
+    if (sid < 0) {
         exit(EXIT_FAILURE);
     }
     
-    // Change to root directory
-    if (chdir("/") < 0) {
-        daemon_log(LOG_ERR, "Failed to change to root directory");
+    if ((chdir("/")) < 0) {
         exit(EXIT_FAILURE);
     }
     
-    // Close standard file descriptors
     close(STDIN_FILENO);
     close(STDOUT_FILENO);
     close(STDERR_FILENO);
+}
+
+static void adaptive_pid_add_temp_history(int temp) {
+    adaptive_temp_history[adaptive_temp_history_index] = (double)temp;
+    adaptive_temp_history_index = (adaptive_temp_history_index + 1) % 60;
+    if (adaptive_temp_history_size < 60) {
+        adaptive_temp_history_size++;
+    }
+}
+
+static double adaptive_pid_calculate_oscillation(void) {
+    if (adaptive_temp_history_size < 10) return 0.0;
     
-    // Redirect to /dev/null
-    open("/dev/null", O_RDONLY);
-    open("/dev/null", O_WRONLY);
-    open("/dev/null", O_WRONLY);
+    double variance = 0.0;
+    double mean = 0.0;
     
-    daemon_log(LOG_INFO, "Daemon started with PID %d", getpid());
+    // Calculate mean
+    for (int i = 0; i < adaptive_temp_history_size; i++) {
+        mean += adaptive_temp_history[i];
+    }
+    mean /= adaptive_temp_history_size;
+    
+    // Calculate variance
+    for (int i = 0; i < adaptive_temp_history_size; i++) {
+        double diff = adaptive_temp_history[i] - mean;
+        variance += diff * diff;
+    }
+    variance /= adaptive_temp_history_size;
+    
+    return sqrt(variance);
+}
+
+static double adaptive_pid_calculate_performance_score(void) {
+    int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+    double error = fabs((double)temp - (double)target_temperature);
+    double oscillation = adaptive_pid_calculate_oscillation();
+    
+    // Base score based on error (closer to target = higher score)
+    double error_score = 1.0 - (error / 50.0);  // Normalize error to 0-1
+    if (error_score < 0.0) error_score = 0.0;
+    if (error_score > 1.0) error_score = 1.0;
+    
+    // Oscillation penalty (less oscillation = higher score)
+    double oscillation_penalty = oscillation / 10.0;  // Normalize oscillation
+    if (oscillation_penalty > 1.0) oscillation_penalty = 1.0;
+    
+    // Fan efficiency penalty (lower fan usage = higher score, but only if temp is good)
+    double fan_efficiency = 1.0 - ((double)share_info->fan_duty / 100.0);
+    double fan_score = (error < 5.0) ? fan_efficiency : 0.0;  // Only consider fan efficiency if temp is close to target
+    
+    // Combine scores
+    double final_score = (error_score * 0.6) + ((1.0 - oscillation_penalty) * 0.3) + (fan_score * 0.1);
+    
+    return final_score;
+}
+
+static void adaptive_pid_tune_parameters(void) {
+    double current_score = adaptive_pid_calculate_performance_score();
+    double score_change = current_score - adaptive_prev_score;
+    
+    if (debug_mode) {
+        daemon_log(LOG_DEBUG, "Adaptive PID: Score=%.3f, Change=%.3f, Kp=%.2f, Ki=%.3f, Kd=%.2f",
+               current_score, score_change, pid_kp, pid_ki, pid_kd);
+    }
+    
+    // Adjust parameters based on performance
+    if (score_change > 0.05) {
+        // Performance improved, continue in same direction
+        if (debug_mode) daemon_log(LOG_DEBUG, "Adaptive PID: Performance improved, maintaining direction");
+    } else if (score_change < -0.05) {
+        // Performance degraded, reverse direction
+        adaptive_kp_step *= -0.8;
+        adaptive_ki_step *= -0.8;
+        adaptive_kd_step *= -0.8;
+        if (debug_mode) daemon_log(LOG_DEBUG, "Adaptive PID: Performance degraded, reversing direction");
+    }
+    
+    // Adjust Kp (proportional gain)
+    if (current_score < adaptive_target_performance) {
+        pid_kp += adaptive_kp_step;
+        if (pid_kp < 0.5) pid_kp = 0.5;
+        if (pid_kp > 5.0) pid_kp = 5.0;
+    }
+    
+    // Adjust Ki (integral gain)
+    double oscillation = adaptive_pid_calculate_oscillation();
+    int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+    double error = fabs((double)temp - (double)target_temperature);
+    
+    if (oscillation > 3.0) {
+        // High oscillation, reduce Ki and increase Kd
+        pid_ki -= adaptive_ki_step;
+        pid_kd += adaptive_kd_step;
+    } else if (error > 5.0) {
+        // High error, increase Ki
+        pid_ki += adaptive_ki_step;
+    }
+    
+    // Clamp Ki and Kd values
+    if (pid_ki < 0.01) pid_ki = 0.01;
+    if (pid_ki > 0.5) pid_ki = 0.5;
+    if (pid_kd < 0.1) pid_kd = 0.1;
+    if (pid_kd > 2.0) pid_kd = 2.0;
+    
+    adaptive_prev_score = current_score;
+    adaptive_performance_score = current_score;
+    adaptive_learning_cycles++;
+    
+    if (debug_mode) {
+        daemon_log(LOG_DEBUG, "Adaptive PID: New parameters - Kp=%.2f, Ki=%.3f, Kd=%.2f",
+               pid_kp, pid_ki, pid_kd);
+    }
+}
+
+static void adaptive_pid_reset(void) {
+    adaptive_learning_cycles = 0;
+    adaptive_performance_score = 0.0;
+    adaptive_prev_score = 0.0;
+    adaptive_oscillation_penalty = 0.0;
+    adaptive_overshoot_penalty = 0.0;
+    adaptive_settling_time = 0.0;
+    adaptive_cycle_start_time = 0;
+    adaptive_cycle_count = 0;
+    adaptive_temp_history_index = 0;
+    adaptive_temp_history_size = 0;
+    
+    // Reset step sizes to defaults
+    adaptive_kp_step = 0.1;
+    adaptive_ki_step = 0.01;
+    adaptive_kd_step = 0.05;
+    
+    if (debug_mode) daemon_log(LOG_DEBUG, "Adaptive PID controller reset");
+}
+
+static void pid_reset(void) {
+    pid_integral = 0.0;
+    pid_prev_error = 0.0;
+    // Reset adaptive PID if enabled
+    if (adaptive_pid_enabled) {
+        adaptive_pid_reset();
+    }
+    if (debug_mode) daemon_log(LOG_DEBUG, "PID controller and adaptive controller reset");
 } 

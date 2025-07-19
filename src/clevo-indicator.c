@@ -88,6 +88,7 @@ static int main_test_fan(int duty_percentage);
 static gboolean ui_update(gpointer user_data);
 static void ui_command_set_fan(long fan_duty);
 static void ui_command_quit(gchar* command);
+static void ui_command_show_temp(gchar* command);
 static void ui_toggle_menuitems(int fan_duty);
 static void ec_on_sigterm(int signum);
 static int ec_init(void);
@@ -122,6 +123,11 @@ static void pid_reset(void);
 static void calculate_temp_rate_of_change(void);
 static char* get_temp_trend_symbol(double rate);
 static char* get_temp_trend_color(double rate);
+static void adaptive_pid_add_temp_history(int temp);
+static double adaptive_pid_calculate_oscillation(void);
+static double adaptive_pid_calculate_performance_score(void);
+static void adaptive_pid_tune_parameters(void);
+static void adaptive_pid_reset(void);
 
 static AppIndicator* indicator = NULL;
 
@@ -142,6 +148,7 @@ struct {
         { "Set FAN to  1%", G_CALLBACK(ui_command_set_fan), 1, MANUAL, NULL },
         { "Set FAN to 100%", G_CALLBACK(ui_command_set_fan), 100, MANUAL, NULL },
         { "", NULL, 0L, NA, NULL },
+        { "Show Temperatures", G_CALLBACK(ui_command_show_temp), 0L, NA, NULL },
         { "Quit", G_CALLBACK(ui_command_quit), 0L, NA, NULL }
 };
 
@@ -162,8 +169,9 @@ struct {
 static pid_t parent_pid = 0;
 static int debug_mode = 0;
 static int status_mode = 0;
-static int status_interval = 2; // Default 2 seconds
+static double status_interval = 2.0; // Default 2 seconds
 static int target_temperature = 65; // Default target temperature
+static int temp_output_interval = 30; // Default 30 seconds for temperature output
 
 // PID Controller variables
 static double pid_kp = 2.0;  // Proportional gain
@@ -181,6 +189,35 @@ static int prev_gpu_temp = 0;
 static double cpu_temp_rate = 0.0;  // °C per second
 static double gpu_temp_rate = 0.0;  // °C per second
 static time_t last_temp_update = 0;
+
+// Adaptive PID Controller variables
+static int adaptive_pid_enabled = 1;  // Enable adaptive tuning
+static int adaptive_learning_cycles = 0;  // Number of learning cycles completed
+static double adaptive_performance_score = 0.0;  // Current performance score
+static double adaptive_prev_score = 0.0;  // Previous performance score
+static double adaptive_oscillation_penalty = 0.0;  // Penalty for oscillation
+static double adaptive_overshoot_penalty = 0.0;  // Penalty for overshoot
+static double adaptive_settling_time = 0.0;  // Time to reach target
+static int adaptive_cycle_start_time = 0;  // Start time of current cycle
+static int adaptive_cycle_count = 0;  // Cycles since last tuning
+static double adaptive_temp_history[60];  // Temperature history for analysis
+static int adaptive_temp_history_index = 0;  // Current index in history
+static int adaptive_temp_history_size = 0;  // Number of samples in history
+
+// Adaptive tuning parameters
+static double adaptive_kp_step = 0.1;  // Step size for Kp adjustments
+static double adaptive_ki_step = 0.01;  // Step size for Ki adjustments  
+static double adaptive_kd_step = 0.05;  // Step size for Kd adjustments
+static int adaptive_tuning_interval = 30;  // Tuning interval in seconds
+static double adaptive_target_performance = 0.8;  // Target performance score
+
+// Rapid learning variables
+static int adaptive_rapid_learning_cycles = 0;  // Cycles in rapid learning mode
+static int adaptive_rapid_learning_max = 10;  // Maximum rapid learning cycles
+static double adaptive_rapid_step_multiplier = 3.0;  // Multiplier for rapid learning steps
+static double adaptive_steady_state_threshold = 0.05;  // Performance stability threshold
+static int adaptive_consecutive_stable_cycles = 0;  // Consecutive cycles with stable performance
+static int adaptive_steady_state_cycles_required = 5;  // Cycles required for steady state
 
 int main(int argc, char* argv[]) {
     printf("Simple fan control utility for Clevo laptops\n");
@@ -228,7 +265,7 @@ int main(int argc, char* argv[]) {
         // Run status display loop with auto fan control
         while (1) {
             status_display_update_with_control();
-            usleep(status_interval * 1000000); // Convert to microseconds
+            usleep((int)(status_interval * 1000000)); // Convert to microseconds
         }
     }
     
@@ -418,6 +455,16 @@ static void main_ui_worker(int argc, char** argv) {
     app_indicator_set_menu(indicator, GTK_MENU(indicator_menu));
     g_timeout_add(500, &ui_update, NULL);
     ui_toggle_menuitems(share_info->fan_duty);
+    
+    // Print initial temperature status
+    printf("Clevo Fan Control Indicator Started\n");
+    printf("Current Status:\n");
+    printf("  CPU: %d°C\n", share_info->cpu_temp);
+    printf("  GPU: %d°C\n", share_info->gpu_temp);
+    printf("  Fan: %d RPM (%d%% duty)\n", share_info->fan_rpms, share_info->fan_duty);
+    printf("  Mode: %s\n", share_info->auto_duty ? "AUTO" : "MANUAL");
+    printf("Press Ctrl+C to exit\n\n");
+    
     gtk_main();
     if (debug_mode) printf("main on UI quit\n");
 }
@@ -463,6 +510,24 @@ static gboolean ui_update(gpointer user_data) {
     double load_r = round(load / 5.0) * 5.0;
     sprintf(icon_name, "brasero-disc-%02d", (int) load_r);
     app_indicator_set_icon(indicator, icon_name);
+    
+    // Print temperature status at configurable intervals
+    static int update_counter = 0;
+    update_counter++;
+    int output_ticks = temp_output_interval * 2; // Convert seconds to ticks (500ms per tick)
+    if (update_counter >= output_ticks) {
+        update_counter = 0;
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        char time_str[20];
+        strftime(time_str, sizeof(time_str), "%H:%M:%S", tm_info);
+        
+        printf("[%s] CPU: %d°C, GPU: %d°C, Fan: %d RPM (%d%% duty), Mode: %s\n",
+               time_str, share_info->cpu_temp, share_info->gpu_temp, 
+               share_info->fan_rpms, share_info->fan_duty,
+               share_info->auto_duty ? "AUTO" : "MANUAL");
+    }
+    
     return G_SOURCE_CONTINUE;
 }
 
@@ -489,6 +554,16 @@ static void ui_command_set_fan(long fan_duty) {
 static void ui_command_quit(gchar* command) {
     if (debug_mode) printf("clicked on quit\n");
     gtk_main_quit();
+}
+
+static void ui_command_show_temp(gchar* command) {
+    if (debug_mode) printf("clicked on show temperatures\n");
+    // In indicator mode, we just print the current temperatures
+    printf("Current Temperatures:\n");
+    printf("  CPU: %d°C\n", ec_query_cpu_temp());
+    printf("  GPU: %d°C\n", ec_query_gpu_temp());
+    printf("  Fan: %d RPM\n", ec_query_fan_rpms());
+    printf("  Duty: %d%%\n", ec_query_fan_duty());
 }
 
 static void ui_toggle_menuitems(int fan_duty) {
@@ -546,6 +621,18 @@ static int ec_auto_duty_adjust(void) {
     double setpoint = (double)target_temperature;
     double process_variable = (double)temp;
     double error = process_variable - setpoint;
+    
+    // Add temperature to history for adaptive tuning
+    if (adaptive_pid_enabled) {
+        adaptive_pid_add_temp_history(temp);
+        adaptive_cycle_count++;
+        
+        // Perform adaptive tuning at intervals
+        if (adaptive_cycle_count >= adaptive_tuning_interval) {
+            adaptive_pid_tune_parameters();
+            adaptive_cycle_count = 0;
+        }
+    }
     
     // Calculate PID terms
     double proportional = pid_kp * error;
@@ -730,9 +817,9 @@ static void parse_command_line(int argc, char* argv[]) {
             status_mode = 1;
         } else if (strcmp(argv[i], "--interval") == 0) {
             if (i + 1 < argc) {
-                status_interval = atoi(argv[i + 1]);
-                if (status_interval < 1) status_interval = 1;
-                if (status_interval > 60) status_interval = 60;
+                status_interval = atof(argv[i + 1]);
+                if (status_interval < 0.1) status_interval = 0.1;
+                if (status_interval > 60.0) status_interval = 60.0;
                 i++; // Skip the next argument
             } else {
                 printf("Error: --interval requires a value\n");
@@ -746,6 +833,16 @@ static void parse_command_line(int argc, char* argv[]) {
                 i++; // Skip the next argument
             } else {
                 printf("Error: --target-temp requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--temp-output-interval") == 0) {
+            if (i + 1 < argc) {
+                temp_output_interval = atoi(argv[i + 1]);
+                if (temp_output_interval < 5) temp_output_interval = 5;
+                if (temp_output_interval > 300) temp_output_interval = 300;
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --temp-output-interval requires a value\n");
                 exit(EXIT_FAILURE);
             }
         } else if (strcmp(argv[i], "--pid-kp") == 0) {
@@ -796,6 +893,74 @@ static void parse_command_line(int argc, char* argv[]) {
                 printf("Error: --pid-enabled requires a value\n");
                 exit(EXIT_FAILURE);
             }
+        } else if (strcmp(argv[i], "--adaptive-pid") == 0) {
+            if (i + 1 < argc) {
+                adaptive_pid_enabled = atoi(argv[i + 1]);
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --adaptive-pid requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--adaptive-tuning-interval") == 0) {
+            if (i + 1 < argc) {
+                adaptive_tuning_interval = atoi(argv[i + 1]);
+                if (adaptive_tuning_interval < 10) adaptive_tuning_interval = 10;
+                if (adaptive_tuning_interval > 300) adaptive_tuning_interval = 300;
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --adaptive-tuning-interval requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--adaptive-target-performance") == 0) {
+            if (i + 1 < argc) {
+                adaptive_target_performance = atof(argv[i + 1]);
+                if (adaptive_target_performance < 0.1) adaptive_target_performance = 0.1;
+                if (adaptive_target_performance > 1.0) adaptive_target_performance = 1.0;
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --adaptive-target-performance requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--adaptive-rapid-cycles") == 0) {
+            if (i + 1 < argc) {
+                adaptive_rapid_learning_max = atoi(argv[i + 1]);
+                if (adaptive_rapid_learning_max < 1) adaptive_rapid_learning_max = 1;
+                if (adaptive_rapid_learning_max > 50) adaptive_rapid_learning_max = 50;
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --adaptive-rapid-cycles requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--adaptive-rapid-multiplier") == 0) {
+            if (i + 1 < argc) {
+                adaptive_rapid_step_multiplier = atof(argv[i + 1]);
+                if (adaptive_rapid_step_multiplier < 1.0) adaptive_rapid_step_multiplier = 1.0;
+                if (adaptive_rapid_step_multiplier > 10.0) adaptive_rapid_step_multiplier = 10.0;
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --adaptive-rapid-multiplier requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--adaptive-steady-threshold") == 0) {
+            if (i + 1 < argc) {
+                adaptive_steady_state_threshold = atof(argv[i + 1]);
+                if (adaptive_steady_state_threshold < 0.01) adaptive_steady_state_threshold = 0.01;
+                if (adaptive_steady_state_threshold > 0.2) adaptive_steady_state_threshold = 0.2;
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --adaptive-steady-threshold requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--adaptive-steady-cycles") == 0) {
+            if (i + 1 < argc) {
+                adaptive_steady_state_cycles_required = atoi(argv[i + 1]);
+                if (adaptive_steady_state_cycles_required < 1) adaptive_steady_state_cycles_required = 1;
+                if (adaptive_steady_state_cycles_required > 20) adaptive_steady_state_cycles_required = 20;
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --adaptive-steady-cycles requires a value\n");
+                exit(EXIT_FAILURE);
+            }
         } else if (strcmp(argv[i], "--pid-reset") == 0) {
             pid_reset();
             printf("PID controller state reset.\n");
@@ -810,8 +975,9 @@ Dump/Control fan duty on Clevo laptops. Display indicator by default.\n\
 Options:\n\
   --debug\t\tEnable debug output\n\
   --status\t\tEnable live status display mode\n\
-  --interval <sec>\tSet status update interval (1-60 seconds, default: 2)\n\
+  --interval <sec>\tSet status update interval (0.1-60.0 seconds, default: 2.0)\n\
   --target-temp <\u00b0C>\tSet the target temperature for auto fan control (40-100\u00b0C, default: 65)\n\
+  --temp-output-interval <sec>\tSet temperature output interval (5-300 seconds, default: 30)\n\
   --pid-kp <value>\tSet PID Proportional gain (default: 2.0)\n\
   --pid-ki <value>\tSet PID Integral gain (default: 0.1)\n\
   --pid-kd <value>\tSet PID Derivative gain (default: 0.5)\n\
@@ -819,6 +985,13 @@ Options:\n\
   --pid-output-max <value>\tSet PID output maximum (default: 100.0)\n\
   --pid-enabled <0|1>\tEnable/Disable PID control (default: 1)\n\
   --pid-reset\t\tReset PID controller state (integral, error, output)\n\
+  --adaptive-pid <0|1>\tEnable/Disable adaptive PID tuning (default: 1)\n\
+  --adaptive-tuning-interval <sec>\tSet adaptive tuning interval (10-300s, default: 30)\n\
+  --adaptive-target-performance <value>\tSet target performance score (0.1-1.0, default: 0.8)\n\
+  --adaptive-rapid-cycles <num>\tSet rapid learning cycles (1-50, default: 10)\n\
+  --adaptive-rapid-multiplier <value>\tSet rapid learning step multiplier (1.0-10.0, default: 3.0)\n\
+  --adaptive-steady-threshold <value>\tSet steady state threshold (0.01-0.2, default: 0.05)\n\
+  --adaptive-steady-cycles <num>\tSet steady state cycles required (1-20, default: 5)\n\
   -?, --help\t\tDisplay this help and exit\n\
 \n\
 Arguments:\n\
@@ -854,10 +1027,50 @@ PID Controller:\n\
   Example tuning for aggressive cooling:\n\
     --pid-kp 3.0 --pid-ki 0.2 --pid-kd 0.8\n\
 \n\
-  Example tuning for quiet operation:\n\
+    Example tuning for quiet operation:\n\
     --pid-kp 1.5 --pid-ki 0.05 --pid-kd 0.3\n\
 \n\
-Modern Privilege Management:\n\
+Adaptive PID Controller:\n\
+  The system includes an adaptive PID controller that automatically tunes its\n\
+  parameters based on performance metrics. It learns from temperature control\n\
+  effectiveness and adjusts Kp, Ki, and Kd values to optimize performance.\n\
+\n\
+  Adaptive Features:\n\
+    - Performance scoring based on error, oscillation, and fan efficiency\n\
+    - Automatic parameter adjustment every 30 seconds (configurable)\n\
+    - Learning cycles that track improvement over time\n\
+    - Oscillation detection and damping\n\
+    - Rapid learning phase for quick initial adaptation\n\
+    - Steady state detection for conservative fine-tuning\n\
+\n\
+  Learning Phases:\n\
+    1. Rapid Learning (first 10 cycles): Fast adaptation with 3x step sizes\n\
+    2. Normal Tuning: Standard adaptation until steady state detected\n\
+    3. Steady State: Conservative tuning when performance is stable\n\
+\n\
+  Adaptive Parameters:\n\
+    --adaptive-pid: Enable/disable adaptive tuning\n\
+    --adaptive-tuning-interval: How often to tune parameters (seconds)\n\
+    --adaptive-target-performance: Target performance score (0.1-1.0)\n\
+    --adaptive-rapid-cycles: Number of rapid learning cycles (1-50)\n\
+    --adaptive-rapid-multiplier: Step size multiplier for rapid learning (1.0-10.0)\n\
+    --adaptive-steady-threshold: Performance stability threshold (0.01-0.2)\n\
+    --adaptive-steady-cycles: Cycles required for steady state (1-20)\n\
+\n\
+  Example adaptive configurations:\n\
+    # Conservative adaptive tuning\n\
+    --adaptive-tuning-interval 60 --adaptive-target-performance 0.7\n\
+\n\
+    # Aggressive adaptive tuning\n\
+    --adaptive-tuning-interval 15 --adaptive-target-performance 0.9\n\
+\n\
+    # Rapid learning with extended initial phase\n\
+    --adaptive-rapid-cycles 20 --adaptive-rapid-multiplier 5.0\n\
+\n\
+    # Conservative steady state detection\n\
+    --adaptive-steady-threshold 0.03 --adaptive-steady-cycles 8\n\
+\n\
+  Modern Privilege Management:\n\
 This program now supports multiple privilege elevation methods:\n\
 \n\
 1. Capabilities (Recommended):\n\
@@ -977,7 +1190,11 @@ static void pid_reset(void) {
     cpu_temp_rate = 0.0;
     gpu_temp_rate = 0.0;
     last_temp_update = 0;
-    if (debug_mode) printf("[DEBUG] PID controller and temperature tracking reset\n");
+    // Reset adaptive PID if enabled
+    if (adaptive_pid_enabled) {
+        adaptive_pid_reset();
+    }
+    if (debug_mode) printf("[DEBUG] PID controller, temperature tracking, and adaptive controller reset\n");
 }
 
 static void calculate_temp_rate_of_change(void) {
@@ -1010,6 +1227,177 @@ static char* get_temp_trend_color(double rate) {
     if (rate < -2.0) return "\033[32m"; // Green for rapidly decreasing
     if (rate < -0.5) return "\033[36m"; // Cyan for decreasing
     return "\033[37m";                   // White for stable
+}
+
+static void adaptive_pid_add_temp_history(int temp) {
+    adaptive_temp_history[adaptive_temp_history_index] = (double)temp;
+    adaptive_temp_history_index = (adaptive_temp_history_index + 1) % 60;
+    if (adaptive_temp_history_size < 60) {
+        adaptive_temp_history_size++;
+    }
+}
+
+static double adaptive_pid_calculate_oscillation(void) {
+    if (adaptive_temp_history_size < 10) return 0.0;
+    
+    double variance = 0.0;
+    double mean = 0.0;
+    
+    // Calculate mean
+    for (int i = 0; i < adaptive_temp_history_size; i++) {
+        mean += adaptive_temp_history[i];
+    }
+    mean /= adaptive_temp_history_size;
+    
+    // Calculate variance
+    for (int i = 0; i < adaptive_temp_history_size; i++) {
+        double diff = adaptive_temp_history[i] - mean;
+        variance += diff * diff;
+    }
+    variance /= adaptive_temp_history_size;
+    
+    return sqrt(variance);
+}
+
+static double adaptive_pid_calculate_performance_score(void) {
+    int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+    double error = fabs((double)temp - (double)target_temperature);
+    double oscillation = adaptive_pid_calculate_oscillation();
+    
+    // Base score based on error (closer to target = higher score)
+    double error_score = 1.0 - (error / 50.0);  // Normalize error to 0-1
+    if (error_score < 0.0) error_score = 0.0;
+    if (error_score > 1.0) error_score = 1.0;
+    
+    // Oscillation penalty (less oscillation = higher score)
+    double oscillation_penalty = oscillation / 10.0;  // Normalize oscillation
+    if (oscillation_penalty > 1.0) oscillation_penalty = 1.0;
+    
+    // Fan efficiency penalty (lower fan usage = higher score, but only if temp is good)
+    double fan_efficiency = 1.0 - ((double)share_info->fan_duty / 100.0);
+    double fan_score = (error < 5.0) ? fan_efficiency : 0.0;  // Only consider fan efficiency if temp is close to target
+    
+    // Combine scores
+    double final_score = (error_score * 0.6) + ((1.0 - oscillation_penalty) * 0.3) + (fan_score * 0.1);
+    
+    return final_score;
+}
+
+static void adaptive_pid_tune_parameters(void) {
+    double current_score = adaptive_pid_calculate_performance_score();
+    double score_change = current_score - adaptive_prev_score;
+    
+    // Determine if we're in rapid learning mode or steady state
+    bool rapid_learning = (adaptive_rapid_learning_cycles < adaptive_rapid_learning_max);
+    bool approaching_steady_state = (adaptive_consecutive_stable_cycles >= adaptive_steady_state_cycles_required);
+    
+    // Calculate dynamic step sizes based on learning phase
+    double step_multiplier = 1.0;
+    if (rapid_learning) {
+        step_multiplier = adaptive_rapid_step_multiplier;
+    } else if (approaching_steady_state) {
+        step_multiplier = 0.3;  // Conservative tuning in steady state
+    } else {
+        step_multiplier = 1.0;  // Normal tuning
+    }
+    
+    double current_kp_step = adaptive_kp_step * step_multiplier;
+    double current_ki_step = adaptive_ki_step * step_multiplier;
+    double current_kd_step = adaptive_kd_step * step_multiplier;
+    
+    if (debug_mode) {
+        printf("[DEBUG] Adaptive PID: Score=%.3f, Change=%.3f, Kp=%.2f, Ki=%.3f, Kd=%.2f\n",
+               current_score, score_change, pid_kp, pid_ki, pid_kd);
+        printf("[DEBUG] Learning: Rapid=%s, Steady=%s, StepMult=%.1f\n",
+               rapid_learning ? "YES" : "NO", approaching_steady_state ? "YES" : "NO", step_multiplier);
+    }
+    
+    // Check for steady state (stable performance)
+    if (fabs(score_change) < adaptive_steady_state_threshold) {
+        adaptive_consecutive_stable_cycles++;
+    } else {
+        adaptive_consecutive_stable_cycles = 0;
+    }
+    
+    // Adjust parameters based on performance
+    if (score_change > 0.05) {
+        // Performance improved, continue in same direction
+        if (debug_mode) printf("[DEBUG] Adaptive PID: Performance improved, maintaining direction\n");
+    } else if (score_change < -0.05) {
+        // Performance degraded, reverse direction
+        current_kp_step *= -0.8;
+        current_ki_step *= -0.8;
+        current_kd_step *= -0.8;
+        if (debug_mode) printf("[DEBUG] Adaptive PID: Performance degraded, reversing direction\n");
+    }
+    
+    // Adjust Kp (proportional gain)
+    if (current_score < adaptive_target_performance) {
+        pid_kp += current_kp_step;
+        if (pid_kp < 0.5) pid_kp = 0.5;
+        if (pid_kp > 5.0) pid_kp = 5.0;
+    }
+    
+    // Adjust Ki (integral gain)
+    double oscillation = adaptive_pid_calculate_oscillation();
+    int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+    double error = fabs((double)temp - (double)target_temperature);
+    
+    if (oscillation > 3.0) {
+        // High oscillation, reduce Ki and increase Kd
+        pid_ki -= current_ki_step;
+        pid_kd += current_kd_step;
+    } else if (error > 5.0) {
+        // High error, increase Ki
+        pid_ki += current_ki_step;
+    }
+    
+    // Clamp Ki and Kd values
+    if (pid_ki < 0.01) pid_ki = 0.01;
+    if (pid_ki > 0.5) pid_ki = 0.5;
+    if (pid_kd < 0.1) pid_kd = 0.1;
+    if (pid_kd > 2.0) pid_kd = 2.0;
+    
+    adaptive_prev_score = current_score;
+    adaptive_performance_score = current_score;
+    adaptive_learning_cycles++;
+    
+    // Update rapid learning cycle counter
+    if (rapid_learning) {
+        adaptive_rapid_learning_cycles++;
+    }
+    
+    if (debug_mode) {
+        printf("[DEBUG] Adaptive PID: New parameters - Kp=%.2f, Ki=%.3f, Kd=%.2f\n",
+               pid_kp, pid_ki, pid_kd);
+        printf("[DEBUG] Learning Progress: Rapid=%d/%d, Stable=%d/%d\n",
+               adaptive_rapid_learning_cycles, adaptive_rapid_learning_max,
+               adaptive_consecutive_stable_cycles, adaptive_steady_state_cycles_required);
+    }
+}
+
+static void adaptive_pid_reset(void) {
+    adaptive_learning_cycles = 0;
+    adaptive_performance_score = 0.0;
+    adaptive_prev_score = 0.0;
+    adaptive_oscillation_penalty = 0.0;
+    adaptive_overshoot_penalty = 0.0;
+    adaptive_settling_time = 0.0;
+    adaptive_cycle_start_time = 0;
+    adaptive_cycle_count = 0;
+    adaptive_temp_history_index = 0;
+    adaptive_temp_history_size = 0;
+    
+    // Reset rapid learning variables
+    adaptive_rapid_learning_cycles = 0;
+    adaptive_consecutive_stable_cycles = 0;
+    
+    // Reset step sizes to defaults
+    adaptive_kp_step = 0.1;
+    adaptive_ki_step = 0.01;
+    adaptive_kd_step = 0.05;
+    
+    if (debug_mode) printf("[DEBUG] Adaptive PID controller reset (including rapid learning state)\n");
 }
 
 static char* status_get_color_code(int temp) {
@@ -1097,7 +1485,7 @@ static void status_display_update_with_control(void) {
     
     // Header
     printf("\033[1;36m=== Clevo Fan Control - Live Status ===\033[0m\n");
-    printf("Time: %s | Update Interval: %ds\n\n", time_str, status_interval);
+    printf("Time: %s | Update Interval: %.1fs\n\n", time_str, status_interval);
     
     // Temperature section with trends
     printf("\033[1mTemperatures:\033[0m\n");
@@ -1124,9 +1512,32 @@ static void status_display_update_with_control(void) {
     printf("\n\033[1mControl Mode:\033[0m ");
     if (share_info->auto_duty == 1) {
         if (pid_enabled) {
-            printf("\033[32m[AUTO PID]\033[0m - PID-based temperature control\n");
-            printf("  Target: %d°C | Kp: %.1f | Ki: %.2f | Kd: %.1f\n", 
-                   target_temperature, pid_kp, pid_ki, pid_kd);
+            if (adaptive_pid_enabled) {
+                printf("\033[32m[AUTO ADAPTIVE PID]\033[0m - Self-tuning PID control\n");
+                printf("  Target: %d°C | Kp: %.2f | Ki: %.3f | Kd: %.2f\n", 
+                       target_temperature, pid_kp, pid_ki, pid_kd);
+                printf("  Performance: %.3f | Learning Cycles: %d | Tuning Interval: %ds\n",
+                       adaptive_performance_score, adaptive_learning_cycles, adaptive_tuning_interval);
+                
+                // Show rapid learning status
+                bool rapid_learning = (adaptive_rapid_learning_cycles < adaptive_rapid_learning_max);
+                bool approaching_steady_state = (adaptive_consecutive_stable_cycles >= adaptive_steady_state_cycles_required);
+                
+                if (rapid_learning) {
+                    printf("  \033[33m[RAPID LEARNING] %d/%d cycles\033[0m - Fast adaptation phase\n",
+                           adaptive_rapid_learning_cycles, adaptive_rapid_learning_max);
+                } else if (approaching_steady_state) {
+                    printf("  \033[32m[STEADY STATE] %d/%d stable cycles\033[0m - Conservative tuning\n",
+                           adaptive_consecutive_stable_cycles, adaptive_steady_state_cycles_required);
+                } else {
+                    printf("  \033[36m[NORMAL TUNING] %d/%d stable cycles\033[0m - Standard adaptation\n",
+                           adaptive_consecutive_stable_cycles, adaptive_steady_state_cycles_required);
+                }
+            } else {
+                printf("\033[32m[AUTO PID]\033[0m - PID-based temperature control\n");
+                printf("  Target: %d°C | Kp: %.1f | Ki: %.2f | Kd: %.1f\n", 
+                       target_temperature, pid_kp, pid_ki, pid_kd);
+            }
             
             // Show PID error and components if in debug mode
             if (debug_mode) {
@@ -1138,6 +1549,12 @@ static void status_display_update_with_control(void) {
                 
                 printf("  Error: %.1f°C | P: %.1f | I: %.1f | D: %.1f\n",
                        error, proportional, integral, derivative);
+                
+                if (adaptive_pid_enabled) {
+                    double oscillation = adaptive_pid_calculate_oscillation();
+                    printf("  Oscillation: %.2f | Temp History: %d samples\n",
+                           oscillation, adaptive_temp_history_size);
+                }
             }
         } else {
             printf("\033[32m[AUTO SIMPLE]\033[0m - Simple temperature-based control\n");
