@@ -1,0 +1,31 @@
+[Unit]
+Description=Clevo Fan Control Daemon
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/clevo-daemon
+Restart=on-failure
+RestartSec=5
+
+# Capabilities for EC access
+AmbientCapabilities=CAP_SYS_RAWIO
+CapabilityBoundingSet=CAP_SYS_RAWIO
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/sys/kernel/debug/ec
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=clevo-daemon
+
+[Install]
+WantedBy=multi-user.target 
