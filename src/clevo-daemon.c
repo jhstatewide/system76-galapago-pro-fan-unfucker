@@ -407,7 +407,7 @@ static int check_proc_instances(const char* proc_name) {
     struct dirent* ent;
     while ((ent = readdir(dir)) != NULL) {
         if (ent->d_type == DT_DIR && isdigit(ent->d_name[0])) {
-            char path[256];
+            char path[512];
             char comm[256];
             snprintf(path, sizeof(path), "/proc/%s/comm", ent->d_name);
             FILE* f = fopen(path, "r");

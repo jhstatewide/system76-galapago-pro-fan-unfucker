@@ -111,7 +111,6 @@ static void parse_command_line(int argc, char* argv[]);
 static bool setup_privileges(void);
 static void show_privilege_help(void);
 static void status_display_init(void);
-static void status_display_update(void);
 static void status_display_update_with_control(void);
 static void status_display_cleanup(void);
 static void status_display_show_help(void);
@@ -868,61 +867,7 @@ static void status_display_show_help(void) {
     printf("Press Ctrl+C to exit\n\n");
 }
 
-static void status_display_update(void) {
-    // Get current values
-    int cpu_temp = ec_query_cpu_temp();
-    int gpu_temp = ec_query_gpu_temp();
-    int fan_duty = ec_query_fan_duty();
-    int fan_rpms = ec_query_fan_rpms();
-    
-    // Get current time
-    char time_str[64];
-    get_time_string(time_str, sizeof(time_str), "%H:%M:%S");
-    
-    // Clear screen and move to top
-    status_clear_screen();
-    
-    // Header
-    printf("\033[1;36m=== Clevo Fan Control - Live Status ===\033[0m\n");
-    printf("Time: %s | Update Interval: %ds\n\n", time_str, status_interval);
-    
-    // Temperature section
-    printf("\033[1mTemperatures:\033[0m\n");
-    char* cpu_color = status_get_color_code(cpu_temp);
-    char* gpu_color = status_get_color_code(gpu_temp);
-    
-    printf("CPU: %s[%s] %s%d°C\033[0m\n", 
-           cpu_color, status_get_temp_bar(cpu_temp, 100), cpu_color, cpu_temp);
-    printf("GPU: %s[%s] %s%d°C\033[0m\n", 
-           gpu_color, status_get_temp_bar(gpu_temp, 100), gpu_color, gpu_temp);
-    
-    // Fan section
-    printf("\n\033[1mFan Status:\033[0m\n");
-    printf("Duty: %d%%\n", fan_duty);
-    printf("RPM:  [%s] %d RPM\n", status_get_fan_bar(fan_rpms, 4400), fan_rpms);
-    
-    // Mode indicator
-    printf("\n\033[1mControl Mode:\033[0m ");
-    if (fan_duty == 0) {
-        printf("\033[32m[AUTO]\033[0m - Automatic temperature-based control\n");
-    } else {
-        printf("\033[33m[MANUAL: %d%%]\033[0m - Manual fan control\n", fan_duty);
-    }
-    
-    // Status indicators
-    printf("\n\033[1mStatus:\033[0m\n");
-    if (cpu_temp > 80 || gpu_temp > 80) {
-        printf("  \033[31m⚠ CRITICAL TEMPERATURE\033[0m\n");
-    } else if (cpu_temp > 70 || gpu_temp > 70) {
-        printf("  \033[33m⚠ HIGH TEMPERATURE\033[0m\n");
-    } else {
-        printf("  \033[32m✓ Normal operation\033[0m\n");
-    }
-    
-    // Footer
-    printf("\n\033[2mPress Ctrl+C to exit\033[0m\n");
-    fflush(stdout);
-}
+
 
 static void status_display_update_with_control(void) {
     // Update shared memory with current values
