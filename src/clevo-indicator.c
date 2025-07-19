@@ -128,6 +128,9 @@ static double adaptive_pid_calculate_oscillation(void);
 static double adaptive_pid_calculate_performance_score(void);
 static void adaptive_pid_tune_parameters(void);
 static void adaptive_pid_reset(void);
+static bool adaptive_pid_detect_activity(void);
+static bool adaptive_pid_should_learn(void);
+static void adaptive_pid_update_activity_state(void);
 
 static AppIndicator* indicator = NULL;
 
@@ -203,6 +206,18 @@ static int adaptive_cycle_count = 0;  // Cycles since last tuning
 static double adaptive_temp_history[60];  // Temperature history for analysis
 static int adaptive_temp_history_index = 0;  // Current index in history
 static int adaptive_temp_history_size = 0;  // Number of samples in history
+
+// Activity-based learning variables
+static int adaptive_activity_threshold = 2;  // Minimum temperature change (°C) to consider active
+static int adaptive_fan_activity_threshold = 5;  // Minimum fan duty change (%) to consider active
+static int adaptive_stable_period_required = 300;  // Seconds of stability before allowing learning
+static int adaptive_last_activity_time = 0;  // Last time significant activity was detected
+static int adaptive_stable_start_time = 0;  // When current stable period started
+static int adaptive_prev_temp = 0;  // Previous temperature for change detection
+static int adaptive_prev_fan_duty = 0;  // Previous fan duty for change detection
+static bool adaptive_learning_inhibited = false;  // Whether learning is currently inhibited
+static int adaptive_consecutive_idle_cycles = 0;  // Number of consecutive idle tuning cycles
+static int adaptive_max_idle_cycles = 5;  // Maximum idle cycles before inhibiting learning
 
 // Adaptive tuning parameters
 static double adaptive_kp_step = 0.1;  // Step size for Kp adjustments
@@ -627,9 +642,19 @@ static int ec_auto_duty_adjust(void) {
         adaptive_pid_add_temp_history(temp);
         adaptive_cycle_count++;
         
-        // Perform adaptive tuning at intervals
+        // Update activity state
+        adaptive_pid_update_activity_state();
+        
+        // Perform adaptive tuning at intervals, but only if learning is allowed
         if (adaptive_cycle_count >= adaptive_tuning_interval) {
-            adaptive_pid_tune_parameters();
+            if (adaptive_pid_should_learn()) {
+                adaptive_pid_tune_parameters();
+                adaptive_consecutive_idle_cycles = 0;  // Reset idle cycle counter on successful learning
+            } else {
+                adaptive_consecutive_idle_cycles++;  // Increment idle cycle counter
+                if (debug_mode) printf("[DEBUG] Skipping adaptive tuning due to inactivity (idle cycles: %d)\n", 
+                       adaptive_consecutive_idle_cycles);
+            }
             adaptive_cycle_count = 0;
         }
     }
@@ -961,6 +986,46 @@ static void parse_command_line(int argc, char* argv[]) {
                 printf("Error: --adaptive-steady-cycles requires a value\n");
                 exit(EXIT_FAILURE);
             }
+        } else if (strcmp(argv[i], "--adaptive-activity-threshold") == 0) {
+            if (i + 1 < argc) {
+                adaptive_activity_threshold = atoi(argv[i + 1]);
+                if (adaptive_activity_threshold < 1) adaptive_activity_threshold = 1;
+                if (adaptive_activity_threshold > 10) adaptive_activity_threshold = 10;
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --adaptive-activity-threshold requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--adaptive-fan-activity-threshold") == 0) {
+            if (i + 1 < argc) {
+                adaptive_fan_activity_threshold = atoi(argv[i + 1]);
+                if (adaptive_fan_activity_threshold < 1) adaptive_fan_activity_threshold = 1;
+                if (adaptive_fan_activity_threshold > 20) adaptive_fan_activity_threshold = 20;
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --adaptive-fan-activity-threshold requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--adaptive-stable-period") == 0) {
+            if (i + 1 < argc) {
+                adaptive_stable_period_required = atoi(argv[i + 1]);
+                if (adaptive_stable_period_required < 60) adaptive_stable_period_required = 60;
+                if (adaptive_stable_period_required > 1800) adaptive_stable_period_required = 1800;
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --adaptive-stable-period requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--adaptive-max-idle-cycles") == 0) {
+            if (i + 1 < argc) {
+                adaptive_max_idle_cycles = atoi(argv[i + 1]);
+                if (adaptive_max_idle_cycles < 1) adaptive_max_idle_cycles = 1;
+                if (adaptive_max_idle_cycles > 20) adaptive_max_idle_cycles = 20;
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --adaptive-max-idle-cycles requires a value\n");
+                exit(EXIT_FAILURE);
+            }
         } else if (strcmp(argv[i], "--pid-reset") == 0) {
             pid_reset();
             printf("PID controller state reset.\n");
@@ -992,6 +1057,10 @@ Options:\n\
   --adaptive-rapid-multiplier <value>\tSet rapid learning step multiplier (1.0-10.0, default: 3.0)\n\
   --adaptive-steady-threshold <value>\tSet steady state threshold (0.01-0.2, default: 0.05)\n\
   --adaptive-steady-cycles <num>\tSet steady state cycles required (1-20, default: 5)\n\
+  --adaptive-activity-threshold <value>\tSet minimum temperature change (°C) to consider active (1-10, default: 2)\n\
+  --adaptive-fan-activity-threshold <value>\tSet minimum fan duty change (%) to consider active (1-20, default: 5)\n\
+  --adaptive-stable-period <sec>\tSet seconds of stability before allowing learning (60-1800, default: 300)\n\
+  --adaptive-max-idle-cycles <num>\tSet maximum idle cycles before inhibiting learning (1-20, default: 5)\n\
   -?, --help\t\tDisplay this help and exit\n\
 \n\
 Arguments:\n\
@@ -1042,11 +1111,24 @@ Adaptive PID Controller:\n\
     - Oscillation detection and damping\n\
     - Rapid learning phase for quick initial adaptation\n\
     - Steady state detection for conservative fine-tuning\n\
+    - Activity-based learning to prevent overfitting during idle periods\n\
+\n\
+  Activity-Based Learning:\n\
+    The adaptive controller now includes intelligent activity detection to prevent\n\
+    overfitting when the system is idle. Learning is inhibited when:\n\
+    - No significant temperature changes occur (configurable threshold)\n\
+    - No significant fan duty changes occur (configurable threshold)\n\
+    - System has been stable for an extended period (configurable)\n\
+    - Too many consecutive idle learning cycles have occurred\n\
+\n\
+    This prevents the controller from learning from meaningless idle periods\n\
+    where temperatures are stable and performance metrics are artificially high.\n\
 \n\
   Learning Phases:\n\
     1. Rapid Learning (first 10 cycles): Fast adaptation with 3x step sizes\n\
     2. Normal Tuning: Standard adaptation until steady state detected\n\
     3. Steady State: Conservative tuning when performance is stable\n\
+    4. Idle Inhibition: Learning disabled during extended idle periods\n\
 \n\
   Adaptive Parameters:\n\
     --adaptive-pid: Enable/disable adaptive tuning\n\
@@ -1392,12 +1474,99 @@ static void adaptive_pid_reset(void) {
     adaptive_rapid_learning_cycles = 0;
     adaptive_consecutive_stable_cycles = 0;
     
+    // Reset activity-based learning variables
+    adaptive_last_activity_time = time(NULL);
+    adaptive_stable_start_time = time(NULL);
+    adaptive_prev_temp = 0;
+    adaptive_prev_fan_duty = 0;
+    adaptive_learning_inhibited = false;
+    adaptive_consecutive_idle_cycles = 0;
+    
     // Reset step sizes to defaults
     adaptive_kp_step = 0.1;
     adaptive_ki_step = 0.01;
     adaptive_kd_step = 0.05;
     
-    if (debug_mode) printf("[DEBUG] Adaptive PID controller reset (including rapid learning state)\n");
+    if (debug_mode) printf("[DEBUG] Adaptive PID controller reset (including rapid learning state and activity tracking)\n");
+}
+
+static bool adaptive_pid_detect_activity(void) {
+    int current_temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+    int current_fan_duty = share_info->fan_duty;
+    time_t current_time = time(NULL);
+    
+    // Detect temperature change
+    int temp_change = abs(current_temp - adaptive_prev_temp);
+    bool temp_active = temp_change >= adaptive_activity_threshold;
+    
+    // Detect fan duty change
+    int fan_change = abs(current_fan_duty - adaptive_prev_fan_duty);
+    bool fan_active = fan_change >= adaptive_fan_activity_threshold;
+    
+    // Update previous values
+    adaptive_prev_temp = current_temp;
+    adaptive_prev_fan_duty = current_fan_duty;
+    
+    // Activity is detected if either temperature or fan duty changed significantly
+    bool activity_detected = temp_active || fan_active;
+    
+    if (activity_detected) {
+        adaptive_last_activity_time = current_time;
+        adaptive_consecutive_idle_cycles = 0;
+    }
+    
+    if (debug_mode && activity_detected) {
+        printf("[DEBUG] Activity detected: temp_change=%d°C, fan_change=%d%%, temp_active=%s, fan_active=%s\n",
+               temp_change, fan_change, temp_active ? "YES" : "NO", fan_active ? "YES" : "NO");
+    }
+    
+    return activity_detected;
+}
+
+static bool adaptive_pid_should_learn(void) {
+    time_t current_time = time(NULL);
+    
+    // Don't learn if learning is inhibited
+    if (adaptive_learning_inhibited) {
+        if (debug_mode) printf("[DEBUG] Learning inhibited due to idle period\n");
+        return false;
+    }
+    
+    // Don't learn if we haven't had enough activity recently
+    int time_since_activity = current_time - adaptive_last_activity_time;
+    if (time_since_activity > adaptive_stable_period_required) {
+        if (debug_mode) printf("[DEBUG] Learning inhibited: %d seconds since last activity (threshold: %d)\n",
+               time_since_activity, adaptive_stable_period_required);
+        return false;
+    }
+    
+    // Don't learn if we've had too many consecutive idle cycles
+    if (adaptive_consecutive_idle_cycles >= adaptive_max_idle_cycles) {
+        if (debug_mode) printf("[DEBUG] Learning inhibited: %d consecutive idle cycles (max: %d)\n",
+               adaptive_consecutive_idle_cycles, adaptive_max_idle_cycles);
+        return false;
+    }
+    
+    return true;
+}
+
+static void adaptive_pid_update_activity_state(void) {
+    time_t current_time = time(NULL);
+    bool activity_detected = adaptive_pid_detect_activity();
+    
+    if (activity_detected) {
+        // Reset stable period tracking
+        adaptive_stable_start_time = current_time;
+        adaptive_learning_inhibited = false;
+        adaptive_consecutive_idle_cycles = 0;
+    } else {
+        // Check if we've been stable long enough to inhibit learning
+        int stable_duration = current_time - adaptive_stable_start_time;
+        if (stable_duration > adaptive_stable_period_required && !adaptive_learning_inhibited) {
+            adaptive_learning_inhibited = true;
+            if (debug_mode) printf("[DEBUG] Learning inhibited after %d seconds of stability\n", stable_duration);
+        }
+    }
 }
 
 static char* status_get_color_code(int temp) {
@@ -1532,6 +1701,20 @@ static void status_display_update_with_control(void) {
                 } else {
                     printf("  \033[36m[NORMAL TUNING] %d/%d stable cycles\033[0m - Standard adaptation\n",
                            adaptive_consecutive_stable_cycles, adaptive_steady_state_cycles_required);
+                }
+                
+                // Show activity-based learning status
+                time_t current_time = time(NULL);
+                int time_since_activity = current_time - adaptive_last_activity_time;
+                if (adaptive_learning_inhibited) {
+                    printf("  \033[31m[LEARNING INHIBITED] %d seconds since activity\033[0m - Idle period detected\n",
+                           time_since_activity);
+                } else if (time_since_activity > 60) {
+                    printf("  \033[33m[LOW ACTIVITY] %d seconds since activity\033[0m - Learning may be inhibited soon\n",
+                           time_since_activity);
+                } else {
+                    printf("  \033[32m[ACTIVE LEARNING] %d seconds since activity\033[0m - Normal operation\n",
+                           time_since_activity);
                 }
             } else {
                 printf("\033[32m[AUTO PID]\033[0m - PID-based temperature control\n");
