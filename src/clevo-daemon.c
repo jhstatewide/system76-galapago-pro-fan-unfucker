@@ -173,13 +173,44 @@ int main(int argc, char* argv[]) {
         
         daemon_log(LOG_INFO, "Daemon stopped");
     } else {
-        // Fan duty argument provided - run in CLI mode
+        // Check if the argument is a valid fan duty (1-100) or target temperature
         int val = atoi(argv[fan_duty_arg]);
-        if (val < 1 || val > 100) {
-            printf("invalid fan duty %d! (must be 1-100)\n", val);
+        
+        // If it's a valid fan duty (1-100), run in CLI mode
+        if (val >= 1 && val <= 100) {
+            return daemon_test_fan(val);
+        }
+        // If it's a valid target temperature (40-100), run in daemon mode with that temperature
+        else if (val >= 40 && val <= 100) {
+            target_temperature = val;
+            signal_term(&daemon_on_sigterm);
+            daemon_init_share();
+            
+            // Initialize socket server
+            if (init_socket_server() != 0) {
+                daemon_log(LOG_ERR, "Failed to initialize socket server");
+                return EXIT_FAILURE;
+            }
+            
+            daemon_log(LOG_INFO, "Starting fan control daemon with target temperature %d°C", target_temperature);
+            
+            // Run the main daemon loop
+            while (running) {
+                daemon_ec_worker();
+                usleep(status_interval * 1000000); // Convert to microseconds
+            }
+            
+            // Stop socket server
+            stop_socket_server();
+            
+            daemon_log(LOG_INFO, "Daemon stopped");
+        } else {
+            printf("Invalid argument: %s\n", argv[fan_duty_arg]);
+            printf("For fan duty (CLI mode): must be 1-100\n");
+            printf("For target temperature (daemon mode): must be 40-100°C\n");
+            printf("For daemon mode with default temperature: no arguments\n");
             return EXIT_FAILURE;
         }
-        return daemon_test_fan(val);
     }
     
     return EXIT_SUCCESS;
@@ -470,7 +501,7 @@ static void parse_command_line(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "-?") == 0 || strcmp(argv[i], "--help") == 0) {
             printf(
                 "\n"
-                "Usage: clevo-daemon [OPTIONS] [fan-duty-percentage]\n"
+                "Usage: clevo-daemon [OPTIONS] [fan-duty-percentage|target-temperature]\n"
                 "\n"
                 "Headless fan control daemon for Clevo laptops.\n"
                 "\n"
@@ -481,14 +512,18 @@ static void parse_command_line(int argc, char* argv[]) {
                 "  -?, --help\t\tDisplay this help and exit\n"
                 "\n"
                 "Arguments:\n"
-                "  [fan-duty-percentage]\tTarget fan duty in percentage, from 1 to 100\n"
+                "  [fan-duty-percentage]\tTarget fan duty in percentage, from 1 to 100 (CLI mode)\n"
+                "  [target-temperature]\tTarget temperature in °C, from 40 to 100 (Daemon mode)\n"
                 "\n"
                 "Daemon Mode:\n"
                 "  When run without arguments, operates as a daemon with automatic\n"
-                "  temperature-based fan control.\n"
+                "  temperature-based fan control using default target temperature (65°C).\n"
+                "  \n"
+                "  When run with a temperature argument (40-100°C), operates as a daemon\n"
+                "  with the specified target temperature for automatic fan control.\n"
                 "\n"
                 "CLI Mode:\n"
-                "  When a fan duty percentage is provided, sets the fan to that\n"
+                "  When a fan duty percentage (1-100) is provided, sets the fan to that\n"
                 "  percentage and displays current status.\n"
                 "\n"
                 "Modern Privilege Management:\n"

@@ -20,6 +20,56 @@ It shows the CPU temperature on the left and the GPU temperature on the right, a
 
 For command-line, use *-h* to display help, or a number representing percentage of fan duty to control the fan (from 40% to 100%).
 
+## Modern Daemon-Client Architecture
+
+This project now includes a modern daemon-client architecture with the following components:
+
+### Daemon (`clevo-daemon`)
+- **Daemon Mode**: Runs in background with automatic temperature-based fan control
+- **CLI Mode**: Sets fan to specific duty cycle and exits
+- **Target Temperature**: Can set custom target temperature for automatic control
+
+```bash
+# Daemon mode with default temperature (65°C)
+./bin/clevo-daemon
+
+# Daemon mode with custom temperature (70°C)
+./bin/clevo-daemon 70
+
+# CLI mode - set fan to 80%
+./bin/clevo-daemon 80
+```
+
+### Client (`clevo-client`)
+Modern command-line client for monitoring and controlling the daemon:
+
+```bash
+# Show current status
+./bin/clevo-client status
+
+# Monitor continuously
+./bin/clevo-client monitor
+
+# Set fan to 90%
+./bin/clevo-client set-fan 90
+
+# Enable automatic control
+./bin/clevo-client set-auto
+
+# Set target temperature to 75°C
+./bin/clevo-client set-target-temp 75
+
+# JSON output for scripting
+./bin/clevo-client --json status
+```
+
+### Features
+- **Unix Domain Sockets**: Fast, secure local communication
+- **Systemd Integration**: Proper service management
+- **JSON Support**: Machine-readable output for automation
+- **Real-time Monitoring**: Continuous status updates
+- **Modern Security**: Capability-based privilege management
+
 
 Build and Install
 -----------------

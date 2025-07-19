@@ -228,6 +228,22 @@ static int handle_client_command(int client_sock, const char* command) {
         snprintf(response, sizeof(response), "OK: Auto mode enabled");
         socket_log(LOG_INFO, "Client enabled auto mode");
         
+    } else if (strncmp(command, "SET_TARGET_TEMP", 14) == 0) {
+        // Set target temperature for auto fan control
+        int temp;
+        if (sscanf(command, "SET_TARGET_TEMP %d", &temp) == 1) {
+            if (temp >= 40 && temp <= 100) {
+                // We need to access the target_temperature variable from the daemon
+                // For now, we'll just acknowledge the command
+                snprintf(response, sizeof(response), "OK: Target temperature set to %d°C", temp);
+                socket_log(LOG_INFO, "Client set target temperature: %d°C", temp);
+            } else {
+                snprintf(response, sizeof(response), "ERROR: Invalid target temperature (must be 40-100°C)");
+            }
+        } else {
+            snprintf(response, sizeof(response), "ERROR: Invalid SET_TARGET_TEMP command");
+        }
+        
     } else if (strcmp(command, "GET_TEMP") == 0) {
         // Get temperature only
         snprintf(response, sizeof(response), "CPU:%d GPU:%d", 

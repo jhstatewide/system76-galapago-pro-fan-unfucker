@@ -32,6 +32,7 @@ typedef enum {
     CMD_MONITOR,
     CMD_SET_FAN,
     CMD_SET_AUTO,
+    CMD_SET_TARGET_TEMP,
     CMD_GET_TEMP,
     CMD_GET_FAN,
     CMD_HELP
@@ -40,6 +41,7 @@ typedef enum {
 typedef struct {
     CommandType type;
     int fan_duty;
+    int target_temperature;
     int monitor_interval;
     int verbose;
     int json_output;
@@ -125,6 +127,19 @@ int main(int argc, char* argv[]) {
             {
                 char command[64];
                 snprintf(command, sizeof(command), "SET_AUTO");
+                if (send_command(sock, command) == 0) {
+                    char response[BUFFER_SIZE];
+                    if (receive_response(sock, response, sizeof(response)) == 0) {
+                        printf("Response: %s\n", response);
+                    }
+                }
+            }
+            break;
+            
+        case CMD_SET_TARGET_TEMP:
+            {
+                char command[64];
+                snprintf(command, sizeof(command), "SET_TARGET_TEMP %d", config.target_temperature);
                 if (send_command(sock, command) == 0) {
                     char response[BUFFER_SIZE];
                     if (receive_response(sock, response, sizeof(response)) == 0) {
@@ -269,6 +284,7 @@ static void print_help(void) {
     printf("  monitor [INTERVAL]  Continuously monitor status (default: 2s)\n");
     printf("  set-fan DUTY        Set fan duty cycle (1-100%%)\n");
     printf("  set-auto            Enable automatic fan control\n");
+    printf("  set-target-temp TEMP Set target temperature for auto control (40-100°C)\n");
     printf("  get-temp            Get current temperatures\n");
     printf("  get-fan             Get current fan status\n");
     printf("  help                Show this help message\n\n");
@@ -340,6 +356,18 @@ static void parse_arguments(int argc, char* argv[]) {
         }
     } else if (strcmp(command, "set-auto") == 0) {
         config.type = CMD_SET_AUTO;
+    } else if (strcmp(command, "set-target-temp") == 0) {
+        config.type = CMD_SET_TARGET_TEMP;
+        if (optind + 1 < argc) {
+            config.target_temperature = atoi(argv[optind + 1]);
+            if (config.target_temperature < 40 || config.target_temperature > 100) {
+                fprintf(stderr, "Error: Target temperature must be between 40 and 100°C\n");
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            fprintf(stderr, "Error: Target temperature value required\n");
+            exit(EXIT_FAILURE);
+        }
     } else if (strcmp(command, "get-temp") == 0) {
         config.type = CMD_GET_TEMP;
     } else if (strcmp(command, "get-fan") == 0) {
