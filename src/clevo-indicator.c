@@ -118,6 +118,10 @@ static char* status_get_temp_bar(int temp, int max_temp);
 static char* status_get_fan_bar(int rpm, int max_rpm);
 static char* status_get_color_code(int temp);
 static void status_clear_screen(void);
+static void pid_reset(void);
+static void calculate_temp_rate_of_change(void);
+static char* get_temp_trend_symbol(double rate);
+static char* get_temp_trend_color(double rate);
 
 static AppIndicator* indicator = NULL;
 
@@ -160,6 +164,23 @@ static int debug_mode = 0;
 static int status_mode = 0;
 static int status_interval = 2; // Default 2 seconds
 static int target_temperature = 65; // Default target temperature
+
+// PID Controller variables
+static double pid_kp = 2.0;  // Proportional gain
+static double pid_ki = 0.1;  // Integral gain  
+static double pid_kd = 0.5;  // Derivative gain
+static double pid_integral = 0.0;
+static double pid_prev_error = 0.0;
+static double pid_output_min = 0.0;
+static double pid_output_max = 100.0;
+static int pid_enabled = 1;  // Enable PID control by default
+
+// Temperature tracking for rate of change calculation
+static int prev_cpu_temp = 0;
+static int prev_gpu_temp = 0;
+static double cpu_temp_rate = 0.0;  // °C per second
+static double gpu_temp_rate = 0.0;  // °C per second
+static time_t last_temp_update = 0;
 
 int main(int argc, char* argv[]) {
     printf("Simple fan control utility for Clevo laptops\n");
@@ -452,11 +473,15 @@ static void ui_command_set_fan(long fan_duty) {
         share_info->auto_duty = 1;
         share_info->auto_duty_val = 0;
         share_info->manual_next_fan_duty = 0;
+        // Reset PID controller when switching to auto mode
+        pid_reset();
     } else {
         if (debug_mode) printf("clicked on fan duty: %d\n", fan_duty_val);
         share_info->auto_duty = 0;
         share_info->auto_duty_val = 0;
         share_info->manual_next_fan_duty = fan_duty_val;
+        // Reset PID controller when switching to manual mode
+        pid_reset();
     }
     ui_toggle_menuitems(fan_duty_val);
 }
@@ -495,27 +520,67 @@ static void ec_on_sigterm(int signum) {
 }
 
 static int ec_auto_duty_adjust(void) {
+    if (!pid_enabled) {
+        // Fall back to simple control if PID is disabled
+        int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+        int duty = share_info->fan_duty;
+        int new_duty = duty;
+
+        if (temp >= target_temperature) {
+            new_duty = MAX(duty + 2, 10);
+        } else {
+            new_duty = MAX(duty - 2, 0);
+        }
+
+        if (new_duty > 100) {
+            new_duty = 100;
+        } else if (new_duty < 0) {
+            new_duty = 0;
+        }
+
+        return new_duty;
+    }
+
+    // PID Controller implementation
     int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
-    int duty = share_info->fan_duty;
-    int new_duty = duty;
-
-    if (temp >= target_temperature) {
-        // Gradually increase fan duty cycle to find steady state
-        new_duty = MAX(duty + 2, 10);
+    double setpoint = (double)target_temperature;
+    double process_variable = (double)temp;
+    double error = process_variable - setpoint;
+    
+    // Calculate PID terms
+    double proportional = pid_kp * error;
+    
+    // Integral term with anti-windup
+    pid_integral += error;
+    if (pid_integral > 100.0) pid_integral = 100.0;
+    if (pid_integral < -100.0) pid_integral = -100.0;
+    double integral = pid_ki * pid_integral;
+    
+    // Derivative term
+    double derivative = pid_kd * (error - pid_prev_error);
+    
+    // Calculate PID output
+    double output = proportional + integral + derivative;
+    
+    // Clamp output to valid range
+    if (output > pid_output_max) output = pid_output_max;
+    if (output < pid_output_min) output = pid_output_min;
+    
+    // Store error for next iteration
+    pid_prev_error = error;
+    
+    // Convert to integer duty cycle
+    int new_duty = (int)(output + 0.5); // Round to nearest integer
+    
+    // Ensure duty cycle is within valid range
+    if (new_duty > 100) new_duty = 100;
+    if (new_duty < 0) new_duty = 0;
+    
+    if (debug_mode) {
+        printf("[DEBUG] PID: temp=%d, setpoint=%.1f, error=%.1f, p=%.1f, i=%.1f, d=%.1f, output=%.1f, duty=%d\n",
+               temp, setpoint, error, proportional, integral, derivative, output, new_duty);
     }
-    else {
-        // Decrease fan duty cycle if temperature is below target
-        new_duty = MAX(duty - 2, 0);
-    }
-
-    if (new_duty > 100) {
-        new_duty = 100;
-    } else if (new_duty < 0) {
-        new_duty = 0;
-    }
-
-    // printf("Auto duty adjust: %d -> %d\n", duty, new_duty);
-
+    
     return new_duty;
 }
 
@@ -683,6 +748,58 @@ static void parse_command_line(int argc, char* argv[]) {
                 printf("Error: --target-temp requires a value\n");
                 exit(EXIT_FAILURE);
             }
+        } else if (strcmp(argv[i], "--pid-kp") == 0) {
+            if (i + 1 < argc) {
+                pid_kp = atof(argv[i + 1]);
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --pid-kp requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--pid-ki") == 0) {
+            if (i + 1 < argc) {
+                pid_ki = atof(argv[i + 1]);
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --pid-ki requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--pid-kd") == 0) {
+            if (i + 1 < argc) {
+                pid_kd = atof(argv[i + 1]);
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --pid-kd requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--pid-output-min") == 0) {
+            if (i + 1 < argc) {
+                pid_output_min = atof(argv[i + 1]);
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --pid-output-min requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--pid-output-max") == 0) {
+            if (i + 1 < argc) {
+                pid_output_max = atof(argv[i + 1]);
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --pid-output-max requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--pid-enabled") == 0) {
+            if (i + 1 < argc) {
+                pid_enabled = atoi(argv[i + 1]);
+                i++; // Skip the next argument
+            } else {
+                printf("Error: --pid-enabled requires a value\n");
+                exit(EXIT_FAILURE);
+            }
+        } else if (strcmp(argv[i], "--pid-reset") == 0) {
+            pid_reset();
+            printf("PID controller state reset.\n");
+            i++; // Skip the next argument
         } else if (strcmp(argv[i], "-?") == 0 || strcmp(argv[i], "--help") == 0) {
             printf(
                     "\n\
@@ -695,6 +812,13 @@ Options:\n\
   --status\t\tEnable live status display mode\n\
   --interval <sec>\tSet status update interval (1-60 seconds, default: 2)\n\
   --target-temp <\u00b0C>\tSet the target temperature for auto fan control (40-100\u00b0C, default: 65)\n\
+  --pid-kp <value>\tSet PID Proportional gain (default: 2.0)\n\
+  --pid-ki <value>\tSet PID Integral gain (default: 0.1)\n\
+  --pid-kd <value>\tSet PID Derivative gain (default: 0.5)\n\
+  --pid-output-min <value>\tSet PID output minimum (default: 0.0)\n\
+  --pid-output-max <value>\tSet PID output maximum (default: 100.0)\n\
+  --pid-enabled <0|1>\tEnable/Disable PID control (default: 1)\n\
+  --pid-reset\t\tReset PID controller state (integral, error, output)\n\
   -?, --help\t\tDisplay this help and exit\n\
 \n\
 Arguments:\n\
@@ -709,6 +833,29 @@ Target Temperature Control:\n\
   Use --target-temp to set the desired temperature for auto fan control.\n\
   The system will attempt to keep temperatures at or below this value.\n\
   Example: --target-temp 60 will try to keep temps below 60\u00b0C.\n\
+\n\
+PID Controller:\n\
+  The program now includes a sophisticated PID (Proportional-Integral-Derivative)\n\
+  controller for smooth fan control that minimizes oscillation and provides\n\
+  stable temperature regulation.\n\
+\n\
+  PID Parameters:\n\
+    --pid-kp: Proportional gain (default: 2.0) - Controls response speed\n\
+    --pid-ki: Integral gain (default: 0.1) - Eliminates steady-state error\n\
+    --pid-kd: Derivative gain (default: 0.5) - Reduces overshoot and oscillation\n\
+\n\
+  Tuning Guidelines:\n\
+    - Start with default values for most systems\n\
+    - Increase Kp for faster response (but may cause oscillation)\n\
+    - Increase Ki to eliminate temperature offset from target\n\
+    - Increase Kd to reduce overshoot and oscillation\n\
+    - Use --pid-reset to clear controller state if needed\n\
+\n\
+  Example tuning for aggressive cooling:\n\
+    --pid-kp 3.0 --pid-ki 0.2 --pid-kd 0.8\n\
+\n\
+  Example tuning for quiet operation:\n\
+    --pid-kp 1.5 --pid-ki 0.05 --pid-kd 0.3\n\
 \n\
 Modern Privilege Management:\n\
 This program now supports multiple privilege elevation methods:\n\
@@ -821,6 +968,50 @@ static void status_clear_screen(void) {
     printf("\033[H");    // Move cursor to top-left
 }
 
+static void pid_reset(void) {
+    pid_integral = 0.0;
+    pid_prev_error = 0.0;
+    // Reset temperature tracking
+    prev_cpu_temp = 0;
+    prev_gpu_temp = 0;
+    cpu_temp_rate = 0.0;
+    gpu_temp_rate = 0.0;
+    last_temp_update = 0;
+    if (debug_mode) printf("[DEBUG] PID controller and temperature tracking reset\n");
+}
+
+static void calculate_temp_rate_of_change(void) {
+    time_t current_time = time(NULL);
+    
+    if (last_temp_update != 0) {
+        double time_diff = difftime(current_time, last_temp_update);
+        if (time_diff > 0) {
+            cpu_temp_rate = (double)(share_info->cpu_temp - prev_cpu_temp) / time_diff;
+            gpu_temp_rate = (double)(share_info->gpu_temp - prev_gpu_temp) / time_diff;
+        }
+    }
+    
+    prev_cpu_temp = share_info->cpu_temp;
+    prev_gpu_temp = share_info->gpu_temp;
+    last_temp_update = current_time;
+}
+
+static char* get_temp_trend_symbol(double rate) {
+    if (rate > 2.0) return "↗↗";  // Rapidly increasing
+    if (rate > 0.5) return "↗";   // Increasing
+    if (rate < -2.0) return "↘↘"; // Rapidly decreasing
+    if (rate < -0.5) return "↘";   // Decreasing
+    return "→";                    // Stable
+}
+
+static char* get_temp_trend_color(double rate) {
+    if (rate > 2.0) return "\033[31m";  // Red for rapidly increasing
+    if (rate > 0.5) return "\033[33m";  // Yellow for increasing
+    if (rate < -2.0) return "\033[32m"; // Green for rapidly decreasing
+    if (rate < -0.5) return "\033[36m"; // Cyan for decreasing
+    return "\033[37m";                   // White for stable
+}
+
 static char* status_get_color_code(int temp) {
     if (temp < 50) return "\033[32m";      // Green for cool
     if (temp < 70) return "\033[33m";      // Yellow for warm
@@ -876,6 +1067,9 @@ static void status_display_update_with_control(void) {
     share_info->fan_duty = ec_query_fan_duty();
     share_info->fan_rpms = ec_query_fan_rpms();
     
+    // Calculate temperature rate of change
+    calculate_temp_rate_of_change();
+    
     // Run auto fan control logic
     if (share_info->auto_duty == 1) {
         int next_duty = ec_auto_duty_adjust();
@@ -905,25 +1099,49 @@ static void status_display_update_with_control(void) {
     printf("\033[1;36m=== Clevo Fan Control - Live Status ===\033[0m\n");
     printf("Time: %s | Update Interval: %ds\n\n", time_str, status_interval);
     
-    // Temperature section
+    // Temperature section with trends
     printf("\033[1mTemperatures:\033[0m\n");
     char* cpu_color = status_get_color_code(share_info->cpu_temp);
     char* gpu_color = status_get_color_code(share_info->gpu_temp);
+    char* cpu_trend_color = get_temp_trend_color(cpu_temp_rate);
+    char* gpu_trend_color = get_temp_trend_color(gpu_temp_rate);
+    char* cpu_trend_symbol = get_temp_trend_symbol(cpu_temp_rate);
+    char* gpu_trend_symbol = get_temp_trend_symbol(gpu_temp_rate);
     
-    printf("CPU: %s[%s] %s%d°C\033[0m\n", 
-           cpu_color, status_get_temp_bar(share_info->cpu_temp, 100), cpu_color, share_info->cpu_temp);
-    printf("GPU: %s[%s] %s%d°C\033[0m\n", 
-           gpu_color, status_get_temp_bar(share_info->gpu_temp, 100), gpu_color, share_info->gpu_temp);
+    printf("CPU: %s[%s] %s%d°C\033[0m %s%s%.1f°C/s\033[0m\n", 
+           cpu_color, status_get_temp_bar(share_info->cpu_temp, 100), cpu_color, share_info->cpu_temp,
+           cpu_trend_color, cpu_trend_symbol, cpu_temp_rate);
+    printf("GPU: %s[%s] %s%d°C\033[0m %s%s%.1f°C/s\033[0m\n", 
+           gpu_color, status_get_temp_bar(share_info->gpu_temp, 100), gpu_color, share_info->gpu_temp,
+           gpu_trend_color, gpu_trend_symbol, gpu_temp_rate);
     
     // Fan section
     printf("\n\033[1mFan Status:\033[0m\n");
     printf("Duty: %d%%\n", share_info->fan_duty);
     printf("RPM:  [%s] %d RPM\n", status_get_fan_bar(share_info->fan_rpms, 4400), share_info->fan_rpms);
     
-    // Mode indicator
+    // Mode indicator with enhanced PID info
     printf("\n\033[1mControl Mode:\033[0m ");
     if (share_info->auto_duty == 1) {
-        printf("\033[32m[AUTO]\033[0m - Automatic temperature-based control\n");
+        if (pid_enabled) {
+            printf("\033[32m[AUTO PID]\033[0m - PID-based temperature control\n");
+            printf("  Target: %d°C | Kp: %.1f | Ki: %.2f | Kd: %.1f\n", 
+                   target_temperature, pid_kp, pid_ki, pid_kd);
+            
+            // Show PID error and components if in debug mode
+            if (debug_mode) {
+                int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+                double error = (double)temp - (double)target_temperature;
+                double proportional = pid_kp * error;
+                double integral = pid_ki * pid_integral;
+                double derivative = pid_kd * (error - pid_prev_error);
+                
+                printf("  Error: %.1f°C | P: %.1f | I: %.1f | D: %.1f\n",
+                       error, proportional, integral, derivative);
+            }
+        } else {
+            printf("\033[32m[AUTO SIMPLE]\033[0m - Simple temperature-based control\n");
+        }
     } else {
         printf("\033[33m[MANUAL: %d%%]\033[0m - Manual fan control\n", share_info->fan_duty);
     }
@@ -936,6 +1154,20 @@ static void status_display_update_with_control(void) {
         printf("  \033[33m⚠ HIGH TEMPERATURE\033[0m\n");
     } else {
         printf("  \033[32m✓ Normal operation\033[0m\n");
+    }
+    
+    // Temperature trend summary
+    printf("\n\033[1mTemperature Trends:\033[0m\n");
+    if (cpu_temp_rate > 2.0 || gpu_temp_rate > 2.0) {
+        printf("  \033[31m⚠ Rapid temperature increase\033[0m\n");
+    } else if (cpu_temp_rate > 0.5 || gpu_temp_rate > 0.5) {
+        printf("  \033[33m⚠ Temperature increasing\033[0m\n");
+    } else if (cpu_temp_rate < -2.0 || gpu_temp_rate < -2.0) {
+        printf("  \033[32m✓ Rapid cooling\033[0m\n");
+    } else if (cpu_temp_rate < -0.5 || gpu_temp_rate < -0.5) {
+        printf("  \033[36m✓ Cooling\033[0m\n");
+    } else {
+        printf("  \033[37m→ Temperature stable\033[0m\n");
     }
     
     // Footer
