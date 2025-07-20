@@ -5,6 +5,7 @@ CFLAGS = -c -Wall -std=gnu99 -DHAVE_LIBCAP
 LDFLAGS = -lcap
 
 DSTDIR := /usr/local
+OPT_DIR := /opt/galago-pro-fan-control-daemon
 OBJDIR := obj
 SRCDIR := src
 
@@ -43,6 +44,24 @@ install: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
 	@sudo install -m 4750 -g adm $(TARGET) ${DSTDIR}/bin/
 	@sudo install -m 4750 -g adm $(DAEMON_TARGET) ${DSTDIR}/bin/
 	@sudo install -m 755 $(CLIENT_TARGET) ${DSTDIR}/bin/
+
+install-opt: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
+	@echo Installing to ${OPT_DIR}/
+	@sudo mkdir -p ${OPT_DIR}/bin
+	@sudo mkdir -p ${OPT_DIR}/etc
+	@sudo mkdir -p ${OPT_DIR}/systemd
+	@sudo mkdir -p ${OPT_DIR}/polkit
+	@sudo mkdir -p ${OPT_DIR}/docs
+	@sudo install -m 755 $(TARGET) ${OPT_DIR}/bin/
+	@sudo install -m 755 $(DAEMON_TARGET) ${OPT_DIR}/bin/
+	@sudo install -m 755 $(CLIENT_TARGET) ${OPT_DIR}/bin/
+	@sudo install -m 644 systemd/clevo-daemon.service ${OPT_DIR}/systemd/
+	@sudo install -m 644 systemd/clevo-indicator.service ${OPT_DIR}/systemd/
+	@sudo install -m 644 polkit/org.freedesktop.policykit.clevo-indicator.policy ${OPT_DIR}/polkit/
+	@sudo install -m 644 README.md ${OPT_DIR}/docs/
+	@sudo install -m 644 LICENSE ${OPT_DIR}/docs/
+	@echo "Installed to ${OPT_DIR}/"
+	@echo "To enable systemd service: sudo systemctl enable ${OPT_DIR}/systemd/clevo-daemon.service"
 
 install-capabilities: $(TARGET) $(DAEMON_TARGET)
 	@echo Installing with capabilities...

@@ -1,5 +1,5 @@
 [Unit]
-Description=Clevo Fan Control Daemon
+Description=Galago Pro Fan Control Daemon
 After=multi-user.target
 Wants=multi-user.target
 
@@ -7,9 +7,14 @@ Wants=multi-user.target
 Type=simple
 User=root
 Group=root
-ExecStart=/usr/local/bin/clevo-daemon
+ExecStart=/opt/galago-pro-fan-control-daemon/bin/clevo-daemon --target-temp 45
 Restart=on-failure
 RestartSec=5
+
+# Low CPU priority
+Nice=19
+IOSchedulingClass=3
+IOSchedulingPriority=7
 
 # Capabilities for EC access
 AmbientCapabilities=CAP_SYS_RAWIO
@@ -25,7 +30,7 @@ ReadWritePaths=/sys/kernel/debug/ec
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=clevo-daemon
+SyslogIdentifier=galago-pro-fan-daemon
 
 [Install]
 WantedBy=multi-user.target 

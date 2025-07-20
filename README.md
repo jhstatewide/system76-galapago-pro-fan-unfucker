@@ -70,9 +70,62 @@ Modern command-line client for monitoring and controlling the daemon:
 - **Real-time Monitoring**: Continuous status updates
 - **Modern Security**: Capability-based privilege management
 
+## System Installation (Recommended)
 
-Build and Install
------------------
+For a complete system installation with automatic startup at boot:
+
+```bash
+# Run the automated installer
+./install.sh
+```
+
+This will:
+- Install to `/opt/galago-pro-fan-control-daemon`
+- Set up systemd service with low CPU priority
+- Configure default target temperature of 45°C
+- Enable automatic startup at boot
+- Set proper capabilities for EC access
+
+### Service Management
+
+After installation:
+```bash
+# Start the service
+sudo systemctl start galago-pro-fan-daemon
+
+# Check status
+sudo systemctl status galago-pro-fan-daemon
+
+# View logs
+sudo journalctl -u galago-pro-fan-daemon -f
+
+# Stop the service
+sudo systemctl stop galago-pro-fan-daemon
+```
+
+### Configuration
+
+The daemon runs with these default settings:
+- **Target Temperature**: 45°C (configurable)
+- **CPU Priority**: Low (Nice=19)
+- **Auto-restart**: On failure
+- **Capabilities**: SYS_RAWIO for EC access
+
+To modify settings, edit the configuration file:
+```bash
+sudo nano /opt/galago-pro-fan-control-daemon/etc/default.conf
+```
+
+### Uninstallation
+
+To completely remove the system installation:
+```bash
+sudo /opt/galago-pro-fan-control-daemon/uninstall.sh
+```
+
+## Manual Build and Install
+
+For manual installation to `/usr/local`:
 
 ```shell
 sudo apt-get install libappindicator3-dev libgtk-3-dev

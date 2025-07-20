@@ -90,6 +90,16 @@ static double pid_output_min = 0.0;
 static double pid_output_max = 100.0;
 static int pid_enabled = 1;  // Enable PID control by default
 
+// Fan health monitoring variables
+static int fan_health_check_interval = 30;  // Check fan health every 30 seconds
+static int fan_health_counter = 0;
+static int fan_stuck_threshold = 200;  // RPM threshold to consider fan "stuck"
+static int fan_stuck_timeout = 60;  // Seconds before considering fan stuck
+static int fan_stuck_counter = 0;
+static int last_fan_rpm = 0;
+static int fan_recovery_attempts = 0;
+static int max_fan_recovery_attempts = 3;
+
 // Adaptive PID Controller variables
 static int adaptive_pid_enabled = 1;  // Enable adaptive tuning
 static int adaptive_learning_cycles = 0;  // Number of learning cycles completed
@@ -150,6 +160,9 @@ static bool setup_privileges(void);
 static void show_privilege_help(void);
 static void daemon_log(int priority, const char* format, ...);
 static void daemonize(void);
+static void check_fan_health(void);
+static int attempt_fan_recovery(void);
+static void reset_fan_health_monitoring(void);
 
 // Adaptive PID Controller functions
 static void adaptive_pid_add_temp_history(int temp);
@@ -337,6 +350,9 @@ static int daemon_ec_worker(void) {
             share_info->cpu_temp, share_info->gpu_temp, share_info->fan_duty, share_info->fan_rpms);
     }
     
+    // Check fan health
+    check_fan_health();
+    
     // auto EC control
     if (share_info->auto_duty == 1) {
         int next_duty = ec_auto_duty_adjust();
@@ -458,6 +474,22 @@ static int ec_auto_duty_adjust(void) {
     if (new_duty > 100) new_duty = 100;
     if (new_duty < 0) new_duty = 0;
     
+    // Rate limiting to prevent rapid fan changes that could cause issues
+    int current_duty = share_info->fan_duty;
+    int max_duty_change = 15; // Maximum duty cycle change per iteration
+    
+    if (new_duty > current_duty + max_duty_change) {
+        new_duty = current_duty + max_duty_change;
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "Rate limiting: limiting duty increase from %d to %d", current_duty + max_duty_change, new_duty);
+        }
+    } else if (new_duty < current_duty - max_duty_change) {
+        new_duty = current_duty - max_duty_change;
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "Rate limiting: limiting duty decrease from %d to %d", current_duty - max_duty_change, new_duty);
+        }
+    }
+    
     if (debug_mode) {
         daemon_log(LOG_DEBUG, "PID: temp=%d, setpoint=%.1f, error=%.1f, p=%.1f, i=%.1f, d=%.1f, output=%.1f, duty=%d",
                temp, setpoint, error, proportional, integral, derivative, output, new_duty);
@@ -542,7 +574,28 @@ static int calculate_fan_duty(int raw_duty) {
 
 static int calculate_fan_rpms(int raw_rpm_high, int raw_rpm_low) {
     int raw_rpm = (raw_rpm_high << 8) + raw_rpm_low;
-    return raw_rpm > 0 ? (2156220 / raw_rpm) : 0;
+    
+    // Handle edge cases to prevent nonsensical RPM values
+    if (raw_rpm <= 0) {
+        return 0;
+    }
+    
+    // Prevent division by very small numbers that could cause overflow
+    if (raw_rpm < 10) {
+        return 0;  // Fan is likely stopped or in error state
+    }
+    
+    int calculated_rpm = 2156220 / raw_rpm;
+    
+    // Sanity check: RPM should be reasonable (0-10000 for laptop fans)
+    if (calculated_rpm < 0 || calculated_rpm > 10000) {
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "Invalid RPM calculation: raw_rpm=%d, calculated_rpm=%d", raw_rpm, calculated_rpm);
+        }
+        return 0;  // Return 0 for invalid readings
+    }
+    
+    return calculated_rpm;
 }
 
 static int check_proc_instances(const char* proc_name) {
@@ -598,6 +651,8 @@ static void parse_command_line(int argc, char* argv[]) {
         {"adaptive-pid", required_argument, 0, 'a'},
         {"adaptive-tuning-interval", required_argument, 0, 'A'},
         {"adaptive-target-performance", required_argument, 0, 'P'},
+        {"fan-health-check", required_argument, 0, 'f'},
+        {"fan-stuck-threshold", required_argument, 0, 's'},
         {"help",         no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
@@ -605,7 +660,7 @@ static void parse_command_line(int argc, char* argv[]) {
     int option_index = 0;
     int c;
     
-    while ((c = getopt_long(argc, argv, "di:t:Dp:a:A:P:h?", long_options, &option_index)) != -1) {
+    while ((c = getopt_long(argc, argv, "di:t:Dp:a:A:P:f:s:h?", long_options, &option_index)) != -1) {
         switch (c) {
             case 'd':
                 debug_mode = 1;
@@ -644,6 +699,16 @@ static void parse_command_line(int argc, char* argv[]) {
                 if (adaptive_target_performance < 0.1) adaptive_target_performance = 0.1;
                 if (adaptive_target_performance > 1.0) adaptive_target_performance = 1.0;
                 break;
+            case 'f':
+                fan_health_check_interval = atoi(optarg);
+                if (fan_health_check_interval < 10) fan_health_check_interval = 10;
+                if (fan_health_check_interval > 300) fan_health_check_interval = 300;
+                break;
+            case 's':
+                fan_stuck_threshold = atoi(optarg);
+                if (fan_stuck_threshold < 100) fan_stuck_threshold = 100;
+                if (fan_stuck_threshold > 1000) fan_stuck_threshold = 1000;
+                break;
             case 'h':
             case '?':
                 printf(
@@ -661,6 +726,8 @@ static void parse_command_line(int argc, char* argv[]) {
                     "  -a, --adaptive-pid <0|1>\tEnable/Disable adaptive PID tuning (default: 1)\n"
                     "  -A, --adaptive-tuning-interval <sec>\tSet adaptive tuning interval (10-300s, default: 30)\n"
                     "  -P, --adaptive-target-performance <value>\tSet target performance score (0.1-1.0, default: 0.8)\n"
+                    "  -f, --fan-health-check <sec>\tSet fan health check interval (10-300s, default: 30)\n"
+                    "  -s, --fan-stuck-threshold <rpm>\tSet RPM threshold for stuck fan detection (100-1000, default: 200)\n"
                     "  -h, -?, --help\tDisplay this help and exit\n"
                     "\n"
                     "Modes:\n"
@@ -916,4 +983,85 @@ static void pid_reset(void) {
         adaptive_pid_reset();
     }
     if (debug_mode) daemon_log(LOG_DEBUG, "PID controller and adaptive controller reset");
+}
+
+static void check_fan_health(void) {
+    fan_health_counter++;
+    
+    // Check fan health every fan_health_check_interval seconds
+    if (fan_health_counter >= fan_health_check_interval) {
+        fan_health_counter = 0;
+        
+        int current_rpm = share_info->fan_rpms;
+        int current_duty = share_info->fan_duty;
+        int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+        
+        // Check if fan is stuck at low RPM despite high duty cycle
+        if (current_rpm <= fan_stuck_threshold && current_duty > 20 && temp > target_temperature) {
+            fan_stuck_counter++;
+            
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Fan health check: RPM=%d, duty=%d%%, temp=%d°C, stuck_counter=%d", 
+                          current_rpm, current_duty, temp, fan_stuck_counter);
+            }
+            
+            // If fan has been stuck for too long, attempt recovery
+            if (fan_stuck_counter >= fan_stuck_timeout && fan_recovery_attempts < max_fan_recovery_attempts) {
+                daemon_log(LOG_WARNING, "Fan appears stuck at low RPM (%d), attempting recovery", current_rpm);
+                
+                if (attempt_fan_recovery()) {
+                    daemon_log(LOG_INFO, "Fan recovery attempt successful");
+                    reset_fan_health_monitoring();
+                } else {
+                    fan_recovery_attempts++;
+                    daemon_log(LOG_ERR, "Fan recovery attempt failed (%d/%d)", fan_recovery_attempts, max_fan_recovery_attempts);
+                }
+            }
+        } else {
+            // Fan is working normally, reset stuck counter
+            if (fan_stuck_counter > 0) {
+                if (debug_mode) {
+                    daemon_log(LOG_DEBUG, "Fan health check: Fan recovered, resetting stuck counter");
+                }
+                reset_fan_health_monitoring();
+            }
+        }
+        
+        last_fan_rpm = current_rpm;
+    }
+}
+
+static int attempt_fan_recovery(void) {
+    // Try to "kick" the fan by briefly setting it to a higher duty cycle
+    int recovery_duty = 80;  // Set to 80% to try to get fan moving
+    
+    daemon_log(LOG_INFO, "Attempting fan recovery: setting duty to %d%%", recovery_duty);
+    
+    // Set fan to recovery duty
+    int write_result = ec_write_fan_duty(recovery_duty);
+    if (write_result != EXIT_SUCCESS) {
+        daemon_log(LOG_ERR, "Failed to write recovery duty cycle");
+        return 0;
+    }
+    
+    // Wait a moment for fan to respond
+    sleep(3);
+    
+    // Check if fan responded
+    int new_rpm = ec_query_fan_rpms();
+    if (new_rpm > fan_stuck_threshold) {
+        daemon_log(LOG_INFO, "Fan recovery successful: RPM increased to %d", new_rpm);
+        return 1;
+    } else {
+        daemon_log(LOG_WARNING, "Fan recovery failed: RPM still at %d", new_rpm);
+        return 0;
+    }
+}
+
+static void reset_fan_health_monitoring(void) {
+    fan_stuck_counter = 0;
+    fan_recovery_attempts = 0;
+    if (debug_mode) {
+        daemon_log(LOG_DEBUG, "Fan health monitoring reset");
+    }
 } 
