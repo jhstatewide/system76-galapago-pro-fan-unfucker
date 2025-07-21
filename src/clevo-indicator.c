@@ -1041,7 +1041,7 @@ Options:\n\
   --debug\t\tEnable debug output\n\
   --status\t\tEnable live status display mode\n\
   --interval <sec>\tSet status update interval (0.1-60.0 seconds, default: 2.0)\n\
-  --target-temp <\u00b0C>\tSet the target temperature for auto fan control (40-100\u00b0C, default: 65)\n\
+  --target-temp <°C>\tSet the target temperature for auto fan control (40-100°C, default: 65)\n\
   --temp-output-interval <sec>\tSet temperature output interval (5-300 seconds, default: 30)\n\
   --pid-kp <value>\tSet PID Proportional gain (default: 2.0)\n\
   --pid-ki <value>\tSet PID Integral gain (default: 0.1)\n\
@@ -1057,7 +1057,7 @@ Options:\n\
   --adaptive-rapid-multiplier <value>\tSet rapid learning step multiplier (1.0-10.0, default: 3.0)\n\
   --adaptive-steady-threshold <value>\tSet steady state threshold (0.01-0.2, default: 0.05)\n\
   --adaptive-steady-cycles <num>\tSet steady state cycles required (1-20, default: 5)\n\
-  --adaptive-activity-threshold <value>\tSet minimum temperature change (°C) to consider active (1-10, default: 2)\n\
+  --adaptive-activity-threshold <value>\tSet minimum temperature change (deg C) to consider active (1-10, default: 2)\n\
   --adaptive-fan-activity-threshold <value>\tSet minimum fan duty change (%) to consider active (1-20, default: 5)\n\
   --adaptive-stable-period <sec>\tSet seconds of stability before allowing learning (60-1800, default: 300)\n\
   --adaptive-max-idle-cycles <num>\tSet maximum idle cycles before inhibiting learning (1-20, default: 5)\n\
@@ -1074,7 +1074,7 @@ Status Display Mode:\n\
 Target Temperature Control:\n\
   Use --target-temp to set the desired temperature for auto fan control.\n\
   The system will attempt to keep temperatures at or below this value.\n\
-  Example: --target-temp 60 will try to keep temps below 60\u00b0C.\n\
+  Example: --target-temp 60 will try to keep temps below 60°C.\n\
 \n\
 PID Controller:\n\
   The program now includes a sophisticated PID (Proportional-Integral-Derivative)\n\

@@ -81,9 +81,9 @@ static int daemon_mode = 0;
 static volatile int running = 1;
 
 // PID Controller variables
-static double pid_kp = 2.0;  // Proportional gain
-static double pid_ki = 0.1;  // Integral gain  
-static double pid_kd = 0.5;  // Derivative gain
+static double pid_kp = 4.0;  // Increased proportional gain for more aggressive response
+static double pid_ki = 0.3;  // Increased integral gain to eliminate steady-state error
+static double pid_kd = 1.0;  // Increased derivative gain for better damping
 static double pid_integral = 0.0;
 static double pid_prev_error = 0.0;
 static double pid_output_min = 0.0;
@@ -93,7 +93,7 @@ static int pid_enabled = 1;  // Enable PID control by default
 // Fan health monitoring variables
 static int fan_health_check_interval = 30;  // Check fan health every 30 seconds
 static int fan_health_counter = 0;
-static int fan_stuck_threshold = 200;  // RPM threshold to consider fan "stuck"
+static int fan_stuck_threshold = 500;  // RPM threshold to consider fan "stuck" (increased for better detection)
 static int fan_stuck_timeout = 60;  // Seconds before considering fan stuck
 static int fan_stuck_counter = 0;
 static int last_fan_rpm = 0;
@@ -101,14 +101,10 @@ static int fan_recovery_attempts = 0;
 static int max_fan_recovery_attempts = 3;
 
 // Adaptive PID Controller variables
-static int adaptive_pid_enabled = 1;  // Enable adaptive tuning
+static int adaptive_pid_enabled = 0;  // Disable adaptive tuning by default for stability
 static int adaptive_learning_cycles = 0;  // Number of learning cycles completed
 static double adaptive_performance_score = 0.0;  // Current performance score
 static double adaptive_prev_score = 0.0;  // Previous performance score
-static double adaptive_oscillation_penalty = 0.0;  // Penalty for oscillation
-static double adaptive_overshoot_penalty = 0.0;  // Penalty for overshoot
-static double adaptive_settling_time = 0.0;  // Time to reach target
-static int adaptive_cycle_start_time = 0;  // Start time of current cycle
 static int adaptive_cycle_count = 0;  // Cycles since last tuning
 static double adaptive_temp_history[60];  // Temperature history for analysis
 static int adaptive_temp_history_index = 0;  // Current index in history
@@ -169,8 +165,7 @@ static void adaptive_pid_add_temp_history(int temp);
 static double adaptive_pid_calculate_oscillation(void);
 static double adaptive_pid_calculate_performance_score(void);
 static void adaptive_pid_tune_parameters(void);
-static void adaptive_pid_reset(void);
-static void pid_reset(void);
+
 
 int main(int argc, char* argv[]) {
     printf("Clevo Fan Control Daemon\n");
@@ -357,7 +352,12 @@ static int daemon_ec_worker(void) {
     if (share_info->auto_duty == 1) {
         int next_duty = ec_auto_duty_adjust();
         if (debug_mode) daemon_log(LOG_DEBUG, "auto_duty=1, next_duty=%d, prev_auto_duty_val=%d", next_duty, share_info->auto_duty_val);
-        if (next_duty != 0 && next_duty != share_info->auto_duty_val) {
+        
+        // Emergency bypass: Always write if we're in emergency mode, even if duty hasn't changed
+        int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+        bool emergency_mode = (temp >= target_temperature + 10) || (temp >= target_temperature + 5 && next_duty >= 80);
+        
+        if (next_duty != 0 && (next_duty != share_info->auto_duty_val || emergency_mode)) {
             char s_time[256];
             get_time_string(s_time, 256, "%m/%d %H:%M:%S");
             daemon_log(LOG_INFO, "%s CPU=%d°C, GPU=%d°C, auto fan duty to %d%%", s_time, share_info->cpu_temp, share_info->gpu_temp, next_duty);
@@ -427,6 +427,13 @@ static int ec_auto_duty_adjust(void) {
         return new_duty;
     }
 
+    // Enhanced PID Controller with aggressive temperature control
+    // Strategy:
+    // 1. Emergency response: 100% duty when temp is 10°C+ above target
+    // 2. High temp response: 80% duty when temp is 5°C+ above target  
+    // 3. Normal PID control: Standard PID for temperatures closer to target
+    // 4. Minimum duty: 20% when above target to ensure cooling
+
     // PID Controller implementation
     int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
     double setpoint = (double)target_temperature;
@@ -445,54 +452,93 @@ static int ec_auto_duty_adjust(void) {
         }
     }
     
-    // Calculate PID terms
-    double proportional = pid_kp * error;
-    
-    // Integral term with anti-windup
-    pid_integral += error;
-    if (pid_integral > 100.0) pid_integral = 100.0;
-    if (pid_integral < -100.0) pid_integral = -100.0;
-    double integral = pid_ki * pid_integral;
-    
-    // Derivative term
-    double derivative = pid_kd * (error - pid_prev_error);
-    
-    // Calculate PID output
-    double output = proportional + integral + derivative;
-    
-    // Clamp output to valid range
-    if (output > pid_output_max) output = pid_output_max;
-    if (output < pid_output_min) output = pid_output_min;
-    
-    // Store error for next iteration
-    pid_prev_error = error;
-    
-    // Convert to integer duty cycle
-    int new_duty = (int)(output + 0.5); // Round to nearest integer
-    
-    // Ensure duty cycle is within valid range
-    if (new_duty > 100) new_duty = 100;
-    if (new_duty < 0) new_duty = 0;
-    
-    // Rate limiting to prevent rapid fan changes that could cause issues
-    int current_duty = share_info->fan_duty;
-    int max_duty_change = 15; // Maximum duty cycle change per iteration
-    
-    if (new_duty > current_duty + max_duty_change) {
-        new_duty = current_duty + max_duty_change;
+    // Aggressive response for high temperatures
+    int new_duty = 0;
+    if (temp >= target_temperature + 10) {
+        // Very aggressive response when temp is 10°C+ above target
+        new_duty = 100;
         if (debug_mode) {
-            daemon_log(LOG_DEBUG, "Rate limiting: limiting duty increase from %d to %d", current_duty + max_duty_change, new_duty);
+            daemon_log(LOG_DEBUG, "High temperature emergency: temp=%d, target=%d, setting duty to 100%%", temp, target_temperature);
         }
-    } else if (new_duty < current_duty - max_duty_change) {
-        new_duty = current_duty - max_duty_change;
+    } else if (temp >= target_temperature + 5) {
+        // Aggressive response when temp is 5°C+ above target
+        new_duty = 80;
         if (debug_mode) {
-            daemon_log(LOG_DEBUG, "Rate limiting: limiting duty decrease from %d to %d", current_duty - max_duty_change, new_duty);
+            daemon_log(LOG_DEBUG, "High temperature: temp=%d, target=%d, setting duty to 80%%", temp, target_temperature);
+        }
+    } else {
+        // Normal PID control for temperatures closer to target
+        // Calculate PID terms
+        double proportional = pid_kp * error;
+        
+        // Integral term with anti-windup
+        pid_integral += error;
+        if (pid_integral > 100.0) pid_integral = 100.0;
+        if (pid_integral < -100.0) pid_integral = -100.0;
+        double integral = pid_ki * pid_integral;
+        
+        // Derivative term
+        double derivative = pid_kd * (error - pid_prev_error);
+        
+        // Calculate PID output
+        double output = proportional + integral + derivative;
+        
+        // Clamp output to valid range
+        if (output > pid_output_max) output = pid_output_max;
+        if (output < pid_output_min) output = pid_output_min;
+        
+        // Store error for next iteration
+        pid_prev_error = error;
+        
+                // Convert to integer duty cycle
+        new_duty = (int)(output + 0.5); // Round to nearest integer
+        
+        // Ensure duty cycle is within valid range
+        if (new_duty > 100) new_duty = 100;
+        if (new_duty < 0) new_duty = 0;
+        
+        // Ensure minimum duty when temperature is above target
+        if (temp > target_temperature && new_duty < 20) {
+            new_duty = 20; // Minimum 20% duty when above target
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Enforcing minimum duty: temp=%d, target=%d, setting minimum duty to 20%%", temp, target_temperature);
+            }
+        }
+        
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "PID calculation: temp=%d, setpoint=%.1f, error=%.1f, p=%.1f, i=%.1f, d=%.1f, output=%.1f, duty=%d",
+                   temp, setpoint, error, proportional, integral, derivative, output, new_duty);
+        }
+    }
+    
+    // Rate limiting with emergency bypass
+    int current_duty = share_info->fan_duty;
+    int max_duty_change = 25; // Increased from 15 to 25 for faster response
+    
+    // Emergency bypass: Skip rate limiting for critical temperature situations
+    bool emergency_bypass = (temp >= target_temperature + 10) || (temp >= target_temperature + 5 && new_duty >= 80);
+    
+    if (!emergency_bypass) {
+        if (new_duty > current_duty + max_duty_change) {
+            new_duty = current_duty + max_duty_change;
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Rate limiting: limiting duty increase from %d to %d", current_duty + max_duty_change, new_duty);
+            }
+        } else if (new_duty < current_duty - max_duty_change) {
+            new_duty = current_duty - max_duty_change;
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Rate limiting: limiting duty decrease from %d to %d", current_duty - max_duty_change, new_duty);
+            }
+        }
+    } else {
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "Emergency bypass: allowing duty change from %d to %d (temp=%d, target=%d)", current_duty, new_duty, temp, target_temperature);
         }
     }
     
     if (debug_mode) {
-        daemon_log(LOG_DEBUG, "PID: temp=%d, setpoint=%.1f, error=%.1f, p=%.1f, i=%.1f, d=%.1f, output=%.1f, duty=%d",
-               temp, setpoint, error, proportional, integral, derivative, output, new_duty);
+        daemon_log(LOG_DEBUG, "PID: temp=%d, setpoint=%.1f, error=%.1f, duty=%d",
+               temp, setpoint, error, new_duty);
     }
     
     return new_duty;
@@ -723,7 +769,7 @@ static void parse_command_line(int argc, char* argv[]) {
                     "  -t, --target-temp <°C>\tSet the target temperature for auto fan control (40-100°C, default: 65)\n"
                     "  -D, --daemon\t\tExplicitly run in daemon mode (default behavior)\n"
                     "  -p, --pid-enabled <0|1>\tEnable/Disable PID control (default: 1)\n"
-                    "  -a, --adaptive-pid <0|1>\tEnable/Disable adaptive PID tuning (default: 1)\n"
+                    "  -a, --adaptive-pid <0|1>\tEnable/Disable adaptive PID tuning (default: 0)\n"
                     "  -A, --adaptive-tuning-interval <sec>\tSet adaptive tuning interval (10-300s, default: 30)\n"
                     "  -P, --adaptive-target-performance <value>\tSet target performance score (0.1-1.0, default: 0.8)\n"
                     "  -f, --fan-health-check <sec>\tSet fan health check interval (10-300s, default: 30)\n"
@@ -955,35 +1001,9 @@ static void adaptive_pid_tune_parameters(void) {
     }
 }
 
-static void adaptive_pid_reset(void) {
-    adaptive_learning_cycles = 0;
-    adaptive_performance_score = 0.0;
-    adaptive_prev_score = 0.0;
-    adaptive_oscillation_penalty = 0.0;
-    adaptive_overshoot_penalty = 0.0;
-    adaptive_settling_time = 0.0;
-    adaptive_cycle_start_time = 0;
-    adaptive_cycle_count = 0;
-    adaptive_temp_history_index = 0;
-    adaptive_temp_history_size = 0;
-    
-    // Reset step sizes to defaults
-    adaptive_kp_step = 0.1;
-    adaptive_ki_step = 0.01;
-    adaptive_kd_step = 0.05;
-    
-    if (debug_mode) daemon_log(LOG_DEBUG, "Adaptive PID controller reset");
-}
 
-static void pid_reset(void) {
-    pid_integral = 0.0;
-    pid_prev_error = 0.0;
-    // Reset adaptive PID if enabled
-    if (adaptive_pid_enabled) {
-        adaptive_pid_reset();
-    }
-    if (debug_mode) daemon_log(LOG_DEBUG, "PID controller and adaptive controller reset");
-}
+
+
 
 static void check_fan_health(void) {
     fan_health_counter++;
@@ -997,7 +1017,30 @@ static void check_fan_health(void) {
         int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
         
         // Check if fan is stuck at low RPM despite high duty cycle
+        bool fan_health_issue = false;
+        
+        // Case 1: Very low RPM at high duty (definitely stuck)
         if (current_rpm <= fan_stuck_threshold && current_duty > 20 && temp > target_temperature) {
+            fan_health_issue = true;
+        }
+        
+        // Case 2: Suspiciously low RPM at 100% duty (should be thousands of RPM)
+        if (current_duty >= 100 && current_rpm < 1000) {
+            fan_health_issue = true;
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Fan health warning: 100%% duty but only %d RPM (should be 1000+)", current_rpm);
+            }
+        }
+        
+        // Case 3: High temperature with low RPM regardless of duty
+        if (temp > target_temperature + 10 && current_rpm < 1000) {
+            fan_health_issue = true;
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Fan health warning: High temp %d°C but only %d RPM", temp, current_rpm);
+            }
+        }
+        
+        if (fan_health_issue) {
             fan_stuck_counter++;
             
             if (debug_mode) {
@@ -1017,6 +1060,18 @@ static void check_fan_health(void) {
                     daemon_log(LOG_ERR, "Fan recovery attempt failed (%d/%d)", fan_recovery_attempts, max_fan_recovery_attempts);
                 }
             }
+            
+            // Emergency recovery for critical situations
+            if (current_duty >= 100 && current_rpm < 1000 && temp > target_temperature + 10) {
+                daemon_log(LOG_ERR, "CRITICAL: 100%% duty but only %d RPM at %d°C - attempting emergency recovery", current_rpm, temp);
+                
+                if (attempt_fan_recovery()) {
+                    daemon_log(LOG_INFO, "Emergency fan recovery successful");
+                    reset_fan_health_monitoring();
+                } else {
+                    daemon_log(LOG_ERR, "EMERGENCY: Fan recovery failed - hardware may be damaged");
+                }
+            }
         } else {
             // Fan is working normally, reset stuck counter
             if (fan_stuck_counter > 0) {
@@ -1032,30 +1087,37 @@ static void check_fan_health(void) {
 }
 
 static int attempt_fan_recovery(void) {
-    // Try to "kick" the fan by briefly setting it to a higher duty cycle
-    int recovery_duty = 80;  // Set to 80% to try to get fan moving
+    // Try to "kick" the fan by cycling through different duty cycles
+    int recovery_duties[] = {50, 80, 100, 80, 100};  // Cycle through different levels
+    int num_attempts = sizeof(recovery_duties) / sizeof(recovery_duties[0]);
     
-    daemon_log(LOG_INFO, "Attempting fan recovery: setting duty to %d%%", recovery_duty);
+    daemon_log(LOG_INFO, "Attempting fan recovery: cycling through duty cycles");
     
-    // Set fan to recovery duty
-    int write_result = ec_write_fan_duty(recovery_duty);
-    if (write_result != EXIT_SUCCESS) {
-        daemon_log(LOG_ERR, "Failed to write recovery duty cycle");
-        return 0;
+    for (int i = 0; i < num_attempts; i++) {
+        int recovery_duty = recovery_duties[i];
+        
+        // Set fan to recovery duty
+        int write_result = ec_write_fan_duty(recovery_duty);
+        if (write_result != EXIT_SUCCESS) {
+            daemon_log(LOG_ERR, "Failed to write recovery duty cycle %d%%", recovery_duty);
+            continue;
+        }
+        
+        // Wait a moment for fan to respond
+        usleep(500000);  // 0.5 seconds
+        
+        // Check if fan responded
+        int new_rpm = ec_query_fan_rpms();
+        if (new_rpm > 1000) {  // Success if RPM > 1000
+            daemon_log(LOG_INFO, "Fan recovery successful: RPM increased to %d at %d%% duty", new_rpm, recovery_duty);
+            return 1;
+        } else if (debug_mode) {
+            daemon_log(LOG_DEBUG, "Recovery attempt %d: duty=%d%%, RPM=%d", i+1, recovery_duty, new_rpm);
+        }
     }
     
-    // Wait a moment for fan to respond
-    sleep(3);
-    
-    // Check if fan responded
-    int new_rpm = ec_query_fan_rpms();
-    if (new_rpm > fan_stuck_threshold) {
-        daemon_log(LOG_INFO, "Fan recovery successful: RPM increased to %d", new_rpm);
-        return 1;
-    } else {
-        daemon_log(LOG_WARNING, "Fan recovery failed: RPM still at %d", new_rpm);
-        return 0;
-    }
+    daemon_log(LOG_WARNING, "Fan recovery failed: all attempts exhausted");
+    return 0;
 }
 
 static void reset_fan_health_monitoring(void) {
