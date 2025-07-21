@@ -90,6 +90,14 @@ static double pid_output_min = 0.0;
 static double pid_output_max = 100.0;
 static int pid_enabled = 1;  // Enable PID control by default
 
+// Temperature trend tracking for stuck detection
+static int temp_history[10];  // Last 10 temperature readings
+static int temp_history_index = 0;
+static int temp_history_size = 0;
+static int stuck_detection_counter = 0;  // Counter for stuck temperature detection
+static int stuck_threshold_cycles = 20;  // Cycles before considering temperature stuck
+static double stuck_temp_threshold = 2.0;  // Temperature change threshold for stuck detection
+
 // Fan health monitoring variables
 static int fan_health_check_interval = 30;  // Check fan health every 30 seconds
 static int fan_health_counter = 0;
@@ -165,6 +173,11 @@ static void adaptive_pid_add_temp_history(int temp);
 static double adaptive_pid_calculate_oscillation(void);
 static double adaptive_pid_calculate_performance_score(void);
 static void adaptive_pid_tune_parameters(void);
+
+// Temperature trend tracking functions
+static void add_temp_to_history(int temp);
+static bool is_temp_stuck(void);
+static int get_aggressive_duty_for_error(int temp_error);
 
 
 int main(int argc, char* argv[]) {
@@ -427,18 +440,23 @@ static int ec_auto_duty_adjust(void) {
         return new_duty;
     }
 
-    // Enhanced PID Controller with aggressive temperature control
+    // Enhanced PID Controller with aggressive temperature control and learning
     // Strategy:
-    // 1. Emergency response: 100% duty when temp is 10°C+ above target
-    // 2. High temp response: 80% duty when temp is 5°C+ above target  
-    // 3. Normal PID control: Standard PID for temperatures closer to target
-    // 4. Minimum duty: 20% when above target to ensure cooling
+    // 1. Emergency response: 100% duty when temp is 8°C+ above target
+    // 2. High temp response: 90% duty when temp is 5°C+ above target  
+    // 3. Moderate temp response: 70% duty when temp is 3°C+ above target
+    // 4. Stuck detection: Escalate duty if temperature isn't moving toward target
+    // 5. Normal PID control: Standard PID for temperatures closer to target
+    // 6. Minimum duty: 30% when above target to ensure cooling
 
     // PID Controller implementation
     int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
     double setpoint = (double)target_temperature;
     double process_variable = (double)temp;
     double error = process_variable - setpoint;
+    
+    // Track temperature history for stuck detection
+    add_temp_to_history(temp);
     
     // Add temperature to history for adaptive tuning
     if (adaptive_pid_enabled) {
@@ -452,21 +470,32 @@ static int ec_auto_duty_adjust(void) {
         }
     }
     
-    // Aggressive response for high temperatures
+    // Determine if temperature is stuck at a suboptimal level
+    bool temp_stuck = is_temp_stuck();
+    int temp_error = temp - target_temperature;
+    
+    // Aggressive response for high temperatures with progressive escalation
     int new_duty = 0;
-    if (temp >= target_temperature + 10) {
-        // Very aggressive response when temp is 10°C+ above target
+    
+    if (temp_error >= 8) {
+        // Emergency response: 100% duty when temp is 8°C+ above target
         new_duty = 100;
         if (debug_mode) {
-            daemon_log(LOG_DEBUG, "High temperature emergency: temp=%d, target=%d, setting duty to 100%%", temp, target_temperature);
+            daemon_log(LOG_DEBUG, "Emergency response: temp=%d, target=%d, error=%d°C, setting duty to 100%%", temp, target_temperature, temp_error);
         }
-    } else if (temp >= target_temperature + 5) {
-        // Aggressive response when temp is 5°C+ above target
-        new_duty = 80;
+    } else if (temp_error >= 5) {
+        // High temp response: 90% duty when temp is 5°C+ above target
+        new_duty = 90;
         if (debug_mode) {
-            daemon_log(LOG_DEBUG, "High temperature: temp=%d, target=%d, setting duty to 80%%", temp, target_temperature);
+            daemon_log(LOG_DEBUG, "High temperature response: temp=%d, target=%d, error=%d°C, setting duty to 90%%", temp, target_temperature, temp_error);
         }
-    } else {
+    } else if (temp_error >= 3) {
+        // Moderate temp response: 70% duty when temp is 3°C+ above target
+        new_duty = 70;
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "Moderate temperature response: temp=%d, target=%d, error=%d°C, setting duty to 70%%", temp, target_temperature, temp_error);
+        }
+    } else if (temp_error > 0) {
         // Normal PID control for temperatures closer to target
         // Calculate PID terms
         double proportional = pid_kp * error;
@@ -490,7 +519,7 @@ static int ec_auto_duty_adjust(void) {
         // Store error for next iteration
         pid_prev_error = error;
         
-                // Convert to integer duty cycle
+        // Convert to integer duty cycle
         new_duty = (int)(output + 0.5); // Round to nearest integer
         
         // Ensure duty cycle is within valid range
@@ -498,10 +527,10 @@ static int ec_auto_duty_adjust(void) {
         if (new_duty < 0) new_duty = 0;
         
         // Ensure minimum duty when temperature is above target
-        if (temp > target_temperature && new_duty < 20) {
-            new_duty = 20; // Minimum 20% duty when above target
+        if (temp > target_temperature && new_duty < 30) {
+            new_duty = 30; // Minimum 30% duty when above target
             if (debug_mode) {
-                daemon_log(LOG_DEBUG, "Enforcing minimum duty: temp=%d, target=%d, setting minimum duty to 20%%", temp, target_temperature);
+                daemon_log(LOG_DEBUG, "Enforcing minimum duty: temp=%d, target=%d, setting minimum duty to 30%%", temp, target_temperature);
             }
         }
         
@@ -509,14 +538,49 @@ static int ec_auto_duty_adjust(void) {
             daemon_log(LOG_DEBUG, "PID calculation: temp=%d, setpoint=%.1f, error=%.1f, p=%.1f, i=%.1f, d=%.1f, output=%.1f, duty=%d",
                    temp, setpoint, error, proportional, integral, derivative, output, new_duty);
         }
+    } else {
+        // Temperature is at or below target, use PID for fine control
+        double proportional = pid_kp * error;
+        pid_integral += error;
+        if (pid_integral > 100.0) pid_integral = 100.0;
+        if (pid_integral < -100.0) pid_integral = -100.0;
+        double integral = pid_ki * pid_integral;
+        double derivative = pid_kd * (error - pid_prev_error);
+        
+        double output = proportional + integral + derivative;
+        if (output > pid_output_max) output = pid_output_max;
+        if (output < pid_output_min) output = pid_output_min;
+        
+        pid_prev_error = error;
+        new_duty = (int)(output + 0.5);
+        
+        // Ensure duty cycle is within valid range
+        if (new_duty > 100) new_duty = 100;
+        if (new_duty < 0) new_duty = 0;
+        
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "Below target PID: temp=%d, setpoint=%.1f, error=%.1f, duty=%d",
+                   temp, setpoint, error, new_duty);
+        }
+    }
+    
+    // Stuck temperature escalation: If temperature is stuck and above target, escalate duty
+    if (temp_stuck && temp_error > 0) {
+        int escalated_duty = get_aggressive_duty_for_error(temp_error);
+        if (escalated_duty > new_duty) {
+            new_duty = escalated_duty;
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Stuck temperature escalation: temp=%d, target=%d, escalating duty to %d%%", temp, target_temperature, new_duty);
+            }
+        }
     }
     
     // Rate limiting with emergency bypass
     int current_duty = share_info->fan_duty;
-    int max_duty_change = 25; // Increased from 15 to 25 for faster response
+    int max_duty_change = 30; // Increased for faster response
     
     // Emergency bypass: Skip rate limiting for critical temperature situations
-    bool emergency_bypass = (temp >= target_temperature + 10) || (temp >= target_temperature + 5 && new_duty >= 80);
+    bool emergency_bypass = (temp_error >= 8) || (temp_error >= 5 && new_duty >= 80) || temp_stuck;
     
     if (!emergency_bypass) {
         if (new_duty > current_duty + max_duty_change) {
@@ -532,13 +596,14 @@ static int ec_auto_duty_adjust(void) {
         }
     } else {
         if (debug_mode) {
-            daemon_log(LOG_DEBUG, "Emergency bypass: allowing duty change from %d to %d (temp=%d, target=%d)", current_duty, new_duty, temp, target_temperature);
+            daemon_log(LOG_DEBUG, "Emergency bypass: allowing duty change from %d to %d (temp=%d, target=%d, stuck=%s)", 
+                      current_duty, new_duty, temp, target_temperature, temp_stuck ? "true" : "false");
         }
     }
     
     if (debug_mode) {
-        daemon_log(LOG_DEBUG, "PID: temp=%d, setpoint=%.1f, error=%.1f, duty=%d",
-               temp, setpoint, error, new_duty);
+        daemon_log(LOG_DEBUG, "Final duty calculation: temp=%d, setpoint=%.1f, error=%.1f, duty=%d, stuck=%s",
+               temp, setpoint, error, new_duty, temp_stuck ? "true" : "false");
     }
     
     return new_duty;
@@ -1125,5 +1190,68 @@ static void reset_fan_health_monitoring(void) {
     fan_recovery_attempts = 0;
     if (debug_mode) {
         daemon_log(LOG_DEBUG, "Fan health monitoring reset");
+    }
+}
+
+// Temperature trend tracking functions
+static void add_temp_to_history(int temp) {
+    temp_history[temp_history_index] = temp;
+    temp_history_index = (temp_history_index + 1) % 10;
+    if (temp_history_size < 10) {
+        temp_history_size++;
+    }
+}
+
+static bool is_temp_stuck(void) {
+    if (temp_history_size < 5) {
+        return false; // Need at least 5 readings to detect stuck
+    }
+    
+    // Calculate the average temperature over the last few readings
+    int sum = 0;
+    for (int i = 0; i < temp_history_size; i++) {
+        sum += temp_history[i];
+    }
+    double avg_temp = (double)sum / temp_history_size;
+    
+    // Check if all recent temperatures are within the stuck threshold of the average
+    int stuck_count = 0;
+    for (int i = 0; i < temp_history_size; i++) {
+        if (fabs(temp_history[i] - avg_temp) <= stuck_temp_threshold) {
+            stuck_count++;
+        }
+    }
+    
+    // If most readings are within threshold, temperature is stuck
+    bool stuck = (stuck_count >= temp_history_size * 0.8);
+    
+    if (stuck) {
+        stuck_detection_counter++;
+        if (debug_mode && stuck_detection_counter % 10 == 0) {
+            daemon_log(LOG_DEBUG, "Temperature stuck detection: avg=%.1f°C, stuck_count=%d/%d, counter=%d", 
+                      avg_temp, stuck_count, temp_history_size, stuck_detection_counter);
+        }
+    } else {
+        stuck_detection_counter = 0;
+    }
+    
+    // Consider stuck if we've detected it for multiple cycles
+    return (stuck_detection_counter >= stuck_threshold_cycles);
+}
+
+static int get_aggressive_duty_for_error(int temp_error) {
+    // Progressive escalation based on temperature error
+    if (temp_error >= 12) {
+        return 100; // Emergency: 100% duty for 12°C+ error
+    } else if (temp_error >= 8) {
+        return 95;  // Very high: 95% duty for 8-11°C error
+    } else if (temp_error >= 5) {
+        return 85;  // High: 85% duty for 5-7°C error
+    } else if (temp_error >= 3) {
+        return 75;  // Moderate: 75% duty for 3-4°C error
+    } else if (temp_error >= 1) {
+        return 60;  // Low: 60% duty for 1-2°C error
+    } else {
+        return 0;   // No escalation needed
     }
 } 
