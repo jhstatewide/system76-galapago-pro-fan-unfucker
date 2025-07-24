@@ -79,7 +79,7 @@ static double status_interval = 2.0;
 static int target_temperature = 65;
 static int daemon_mode = 0;
 static volatile int running = 1;
-int max_duty_change_rate = 30;  // Default max duty change per cycle (%)
+int max_duty_change_rate = 15;  // Default max duty change per cycle (%)
 
 // PID Controller variables
 static double pid_kp = 4.0;  // Increased proportional gain for more aggressive response
@@ -677,14 +677,20 @@ static int ec_auto_duty_adjust(void) {
     int current_duty = share_info->fan_duty;
     int max_duty_change = max_duty_change_rate; // Use configurable rate
     
-            // Emergency bypass: Allow faster rate limiting for critical temperature situations
-        bool emergency_bypass = (temp_error >= 8) || (temp_error >= 5 && new_duty >= 80) || temp_stuck;
-        
-        // Critical bypass: For very high temperatures, bypass rate limiting entirely
-        bool critical_bypass = (temp_error >= 12) || (temp >= target_temperature + 15);
-        
-        // Cool-down bypass: For temperatures significantly below target, allow faster fan reduction
-        bool cooldown_bypass = (temp_error <= -5) || (temp <= target_temperature - 8);
+    // Emergency bypass: Allow faster rate limiting for critical temperature situations
+    bool emergency_bypass = (temp_error >= 8) || (temp_error >= 5 && new_duty >= 80) || temp_stuck;
+    
+    // Critical bypass: For very high temperatures, bypass rate limiting entirely
+    bool critical_bypass = (temp_error >= 12) || (temp >= target_temperature + 15);
+    
+    // Cool-down bypass: For temperatures significantly below target, allow faster fan reduction
+    bool cooldown_bypass = (temp_error <= -5) || (temp <= target_temperature - 8);
+    
+    if (debug_mode) {
+        daemon_log(LOG_DEBUG, "Rate limiting check: current_duty=%d, new_duty=%d, temp_error=%d, emergency_bypass=%s, critical_bypass=%s, cooldown_bypass=%s", 
+                  current_duty, new_duty, temp_error, emergency_bypass ? "true" : "false", 
+                  critical_bypass ? "true" : "false", cooldown_bypass ? "true" : "false");
+    }
     
     if (!emergency_bypass) {
         // Normal rate limiting
@@ -692,13 +698,17 @@ static int ec_auto_duty_adjust(void) {
             int original_duty = new_duty;
             new_duty = current_duty + max_duty_change;
             if (debug_mode) {
-                daemon_log(LOG_DEBUG, "Rate limiting: limiting duty increase from %d to %d", original_duty, new_duty);
+                daemon_log(LOG_DEBUG, "Normal rate limiting: limiting duty increase from %d to %d (max_change=%d)", original_duty, new_duty, max_duty_change);
             }
         } else if (new_duty < current_duty - max_duty_change) {
             int original_duty = new_duty;
             new_duty = current_duty - max_duty_change;
             if (debug_mode) {
-                daemon_log(LOG_DEBUG, "Rate limiting: limiting duty decrease from %d to %d", original_duty, new_duty);
+                daemon_log(LOG_DEBUG, "Normal rate limiting: limiting duty decrease from %d to %d (max_change=%d)", original_duty, new_duty, max_duty_change);
+            }
+        } else {
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Normal rate limiting: allowing duty change from %d to %d", current_duty, new_duty);
             }
         }
     } else if (critical_bypass) {
@@ -709,7 +719,7 @@ static int ec_auto_duty_adjust(void) {
         }
     } else if (cooldown_bypass) {
         // Cool-down bypass: Allow faster fan reduction when temperature is well below target
-        int cooldown_max_change = max_duty_change * 3; // Allow 3x normal rate for cooldown
+        int cooldown_max_change = max_duty_change * 2; // Allow 2x normal rate for cooldown (reduced from 3x)
         if (new_duty < current_duty - cooldown_max_change) {
             int original_duty = new_duty;
             new_duty = current_duty - cooldown_max_change;
@@ -724,18 +734,18 @@ static int ec_auto_duty_adjust(void) {
             }
         }
     } else {
-        // Emergency rate limiting: Allow much faster response for critical situations
+        // Emergency rate limiting: Allow faster response for critical situations (reduced values)
         int emergency_max_change;
         
         if (temp_error >= 10) {
-            // Critical emergency: Allow up to 50% change per cycle
-            emergency_max_change = 50;
+            // Critical emergency: Allow up to 25% change per cycle (reduced from 50%)
+            emergency_max_change = 25;
         } else if (temp_error >= 8) {
-            // High emergency: Allow up to 30% change per cycle
-            emergency_max_change = 30;
+            // High emergency: Allow up to 15% change per cycle (reduced from 30%)
+            emergency_max_change = 15;
         } else {
-            // Moderate emergency: Allow up to 20% change per cycle
-            emergency_max_change = 20;
+            // Moderate emergency: Allow up to 10% change per cycle (reduced from 20%)
+            emergency_max_change = 10;
         }
         
         if (new_duty > current_duty + emergency_max_change) {
@@ -1018,7 +1028,7 @@ static void parse_command_line(int argc, char* argv[]) {
                     "  -P, --adaptive-target-performance <value>\tSet target performance score (0.1-1.0, default: 0.8)\n"
                     "  -f, --fan-health-check <sec>\tSet fan health check interval (10-300s, default: 30)\n"
                     "  -s, --fan-stuck-threshold <rpm>\tSet RPM threshold for stuck fan detection (100-1000, default: 200)\n"
-                    "  -m, --max-duty-change <%%>\tSet the maximum duty change per cycle (1-100, default: 30)\n"
+                    "  -m, --max-duty-change <%%>\tSet the maximum duty change per cycle (1-100, default: 15)\n"
                     "  -v, --temp-validation <0|1>\tEnable/Disable temperature validation (default: 1)\n"
                     "  -T, --max-temp-change <°C>\tSet max temperature change per cycle (1-50°C, default: 10)\n"
                     "  -h, -?, --help\tDisplay this help and exit\n"
