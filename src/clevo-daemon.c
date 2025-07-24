@@ -99,6 +99,12 @@ static int stuck_detection_counter = 0;  // Counter for stuck temperature detect
 static int stuck_threshold_cycles = 20;  // Cycles before considering temperature stuck
 static double stuck_temp_threshold = 2.0;  // Temperature change threshold for stuck detection
 
+// Temperature validation for sensor glitch detection
+static int last_cpu_temp = 0;
+static int last_gpu_temp = 0;
+static int temp_validation_enabled = 1;  // Enable temperature validation by default
+static int max_temp_change_per_cycle = 10;  // Maximum °C change per cycle (configurable)
+
 // Fan health monitoring variables
 static int fan_health_check_interval = 30;  // Check fan health every 30 seconds
 static int fan_health_counter = 0;
@@ -179,6 +185,10 @@ static void adaptive_pid_tune_parameters(void);
 static void add_temp_to_history(int temp);
 static bool is_temp_stuck(void);
 static int get_aggressive_duty_for_error(int temp_error);
+
+// Temperature validation functions
+static bool validate_temperature_reading(int current_temp, int last_temp, const char* sensor_name);
+static int sanitize_temperature_reading(int current_temp, int last_temp, const char* sensor_name);
 
 
 int main(int argc, char* argv[]) {
@@ -343,8 +353,21 @@ static int daemon_ec_worker(void) {
                 sysfs_available = 0;
                 break;
             case 0x100:
-                share_info->cpu_temp = buf[EC_REG_CPU_TEMP];
-                share_info->gpu_temp = buf[EC_REG_GPU_TEMP];
+                // Validate and sanitize temperature readings
+                int raw_cpu_temp = buf[EC_REG_CPU_TEMP];
+                int raw_gpu_temp = buf[EC_REG_GPU_TEMP];
+                
+                share_info->cpu_temp = sanitize_temperature_reading(raw_cpu_temp, last_cpu_temp, "CPU");
+                share_info->gpu_temp = sanitize_temperature_reading(raw_gpu_temp, last_gpu_temp, "GPU");
+                
+                // Update last valid temperatures
+                if (share_info->cpu_temp == raw_cpu_temp) {
+                    last_cpu_temp = raw_cpu_temp;
+                }
+                if (share_info->gpu_temp == raw_gpu_temp) {
+                    last_gpu_temp = raw_gpu_temp;
+                }
+                
                 share_info->fan_duty = calculate_fan_duty(buf[EC_REG_FAN_DUTY]);
                 share_info->fan_rpms = calculate_fan_rpms(buf[EC_REG_FAN_RPMS_HI], buf[EC_REG_FAN_RPMS_LO]);
                 if (debug_mode) daemon_log(LOG_DEBUG, "sysfs: cpu_temp=%d, gpu_temp=%d, fan_duty=%d, fan_rpms=%d", 
@@ -360,8 +383,22 @@ static int daemon_ec_worker(void) {
     // Fall back to direct I/O if sysfs is not available
     if (!sysfs_available) {
         if (debug_mode) daemon_log(LOG_DEBUG, "Using direct I/O for EC access");
-        share_info->cpu_temp = ec_query_cpu_temp();
-        share_info->gpu_temp = ec_query_gpu_temp();
+        
+        // Validate and sanitize temperature readings
+        int raw_cpu_temp = ec_query_cpu_temp();
+        int raw_gpu_temp = ec_query_gpu_temp();
+        
+        share_info->cpu_temp = sanitize_temperature_reading(raw_cpu_temp, last_cpu_temp, "CPU");
+        share_info->gpu_temp = sanitize_temperature_reading(raw_gpu_temp, last_gpu_temp, "GPU");
+        
+        // Update last valid temperatures
+        if (share_info->cpu_temp == raw_cpu_temp) {
+            last_cpu_temp = raw_cpu_temp;
+        }
+        if (share_info->gpu_temp == raw_gpu_temp) {
+            last_gpu_temp = raw_gpu_temp;
+        }
+        
         share_info->fan_duty = ec_query_fan_duty();
         share_info->fan_rpms = ec_query_fan_rpms();
         if (debug_mode) daemon_log(LOG_DEBUG, "direct I/O: cpu_temp=%d, gpu_temp=%d, fan_duty=%d, fan_rpms=%d", 
@@ -595,25 +632,46 @@ static int ec_auto_duty_adjust(void) {
     int current_duty = share_info->fan_duty;
     int max_duty_change = max_duty_change_rate; // Use configurable rate
     
-    // Emergency bypass: Skip rate limiting for critical temperature situations
+    // Emergency bypass: Allow faster rate limiting for critical temperature situations
     bool emergency_bypass = (temp_error >= 8) || (temp_error >= 5 && new_duty >= 80) || temp_stuck;
     
     if (!emergency_bypass) {
+        // Normal rate limiting
         if (new_duty > current_duty + max_duty_change) {
+            int original_duty = new_duty;
             new_duty = current_duty + max_duty_change;
             if (debug_mode) {
-                daemon_log(LOG_DEBUG, "Rate limiting: limiting duty increase from %d to %d", current_duty + max_duty_change, new_duty);
+                daemon_log(LOG_DEBUG, "Rate limiting: limiting duty increase from %d to %d", original_duty, new_duty);
             }
         } else if (new_duty < current_duty - max_duty_change) {
+            int original_duty = new_duty;
             new_duty = current_duty - max_duty_change;
             if (debug_mode) {
-                daemon_log(LOG_DEBUG, "Rate limiting: limiting duty decrease from %d to %d", current_duty - max_duty_change, new_duty);
+                daemon_log(LOG_DEBUG, "Rate limiting: limiting duty decrease from %d to %d", original_duty, new_duty);
             }
         }
     } else {
-        if (debug_mode) {
-            daemon_log(LOG_DEBUG, "Emergency bypass: allowing duty change from %d to %d (temp=%d, target=%d, stuck=%s)", 
-                      current_duty, new_duty, temp, target_temperature, temp_stuck ? "true" : "false");
+        // Emergency rate limiting: Allow twice the normal rate
+        int emergency_max_change = max_duty_change * 2;
+        if (new_duty > current_duty + emergency_max_change) {
+            int original_duty = new_duty;
+            new_duty = current_duty + emergency_max_change;
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Emergency rate limiting: limiting duty increase from %d to %d (emergency rate: %d)", 
+                          original_duty, new_duty, emergency_max_change);
+            }
+        } else if (new_duty < current_duty - emergency_max_change) {
+            int original_duty = new_duty;
+            new_duty = current_duty - emergency_max_change;
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Emergency rate limiting: limiting duty decrease from %d to %d (emergency rate: %d)", 
+                          original_duty, new_duty, emergency_max_change);
+            }
+        } else {
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Emergency bypass: allowing duty change from %d to %d (temp=%d, target=%d, stuck=%s, emergency rate: %d)", 
+                          current_duty, new_duty, temp, target_temperature, temp_stuck ? "true" : "false", emergency_max_change);
+            }
         }
     }
     
@@ -781,6 +839,8 @@ static void parse_command_line(int argc, char* argv[]) {
         {"fan-health-check", required_argument, 0, 'f'},
         {"fan-stuck-threshold", required_argument, 0, 's'},
         {"max-duty-change", required_argument, 0, 'm'},
+        {"temp-validation", required_argument, 0, 'v'},
+        {"max-temp-change", required_argument, 0, 'T'},
         {"help",         no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
@@ -788,7 +848,7 @@ static void parse_command_line(int argc, char* argv[]) {
     int option_index = 0;
     int c;
     
-    while ((c = getopt_long(argc, argv, "di:t:Dp:a:A:P:f:s:m:h?", long_options, &option_index)) != -1) {
+    while ((c = getopt_long(argc, argv, "di:t:Dp:a:A:P:f:s:m:v:T:h?", long_options, &option_index)) != -1) {
         switch (c) {
             case 'd':
                 debug_mode = 1;
@@ -844,6 +904,16 @@ static void parse_command_line(int argc, char* argv[]) {
                     exit(EXIT_FAILURE);
                 }
                 break;
+            case 'v':
+                temp_validation_enabled = atoi(optarg);
+                break;
+            case 'T':
+                max_temp_change_per_cycle = atoi(optarg);
+                if (max_temp_change_per_cycle < 1 || max_temp_change_per_cycle > 50) {
+                    printf("Invalid max temperature change: %d (must be 1-50°C)\n", max_temp_change_per_cycle);
+                    exit(EXIT_FAILURE);
+                }
+                break;
             case 'h':
             case '?':
                 printf(
@@ -864,6 +934,8 @@ static void parse_command_line(int argc, char* argv[]) {
                     "  -f, --fan-health-check <sec>\tSet fan health check interval (10-300s, default: 30)\n"
                     "  -s, --fan-stuck-threshold <rpm>\tSet RPM threshold for stuck fan detection (100-1000, default: 200)\n"
                     "  -m, --max-duty-change <%%>\tSet the maximum duty change per cycle (1-100, default: 30)\n"
+                    "  -v, --temp-validation <0|1>\tEnable/Disable temperature validation (default: 1)\n"
+                    "  -T, --max-temp-change <°C>\tSet max temperature change per cycle (1-50°C, default: 10)\n"
                     "  -h, -?, --help\tDisplay this help and exit\n"
                     "\n"
                     "Modes:\n"
@@ -1279,4 +1351,43 @@ static int get_aggressive_duty_for_error(int temp_error) {
     } else {
         return 0;   // No escalation needed
     }
+}
+
+static bool validate_temperature_reading(int current_temp, int last_temp, const char* sensor_name) {
+    if (last_temp == 0) {
+        // First reading, always valid
+        return true;
+    }
+    
+    int temp_change = abs(current_temp - last_temp);
+    
+    if (temp_change > max_temp_change_per_cycle) {
+        daemon_log(LOG_WARNING, "Suspicious %s temperature change: %d°C -> %d°C (change: %d°C)", 
+                   sensor_name, last_temp, current_temp, temp_change);
+        return false;
+    }
+    
+    // Additional sanity checks
+    if (current_temp < 0 || current_temp > 120) {
+        daemon_log(LOG_WARNING, "Invalid %s temperature reading: %d°C (outside valid range 0-120°C)", 
+                   sensor_name, current_temp);
+        return false;
+    }
+    
+    return true;
+}
+
+static int sanitize_temperature_reading(int current_temp, int last_temp, const char* sensor_name) {
+    if (!temp_validation_enabled) {
+        return current_temp;
+    }
+    
+    if (validate_temperature_reading(current_temp, last_temp, sensor_name)) {
+        return current_temp;
+    }
+    
+    // If validation fails, use the last valid reading
+    daemon_log(LOG_WARNING, "Using last valid %s temperature: %d°C (rejected: %d°C)", 
+               sensor_name, last_temp, current_temp);
+    return last_temp;
 } 

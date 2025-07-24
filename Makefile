@@ -12,13 +12,19 @@ SRCDIR := src
 SRC = clevo-indicator.c privilege_manager.c
 DAEMON_SRC = clevo-daemon.c clevo-daemon-socket.c privilege_manager.c
 CLIENT_SRC = clevo-client.c
+DIAG_SRC = ec_diagnostic.c
+TEST_SRC = test_settings.c
 OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(SRC))
 DAEMON_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(DAEMON_SRC))
 CLIENT_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(CLIENT_SRC))
+DIAG_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(DIAG_SRC))
+TEST_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(TEST_SRC))
 
 TARGET = bin/clevo-indicator
 DAEMON_TARGET = bin/clevo-daemon
 CLIENT_TARGET = bin/clevo-client
+DIAG_TARGET = bin/ec_diagnostic
+TEST_TARGET = bin/test_settings
 
 PKG_CONFIG ?= pkg-config
 
@@ -112,8 +118,18 @@ $(CLIENT_TARGET): $(CLIENT_OBJ) Makefile
 	@echo linking $(CLIENT_TARGET) from $(CLIENT_OBJ)
 	@$(CC) $(CLIENT_OBJ) -o $(CLIENT_TARGET) $(LDFLAGS) -lm
 
+$(DIAG_TARGET): $(DIAG_OBJ) Makefile
+	@mkdir -p bin
+	@echo linking $(DIAG_TARGET) from $(DIAG_OBJ)
+	@$(CC) $(DIAG_OBJ) -o $(DIAG_TARGET) $(LDFLAGS) -lm
+
+$(TEST_TARGET): $(TEST_OBJ) Makefile
+	@mkdir -p bin
+	@echo linking $(TEST_TARGET) from $(TEST_OBJ)
+	@$(CC) $(TEST_OBJ) -o $(TEST_TARGET) $(LDFLAGS) -lm
+
 clean:
-	rm -f $(OBJ) $(DAEMON_OBJ) $(CLIENT_OBJ) $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
+	rm -f $(OBJ) $(DAEMON_OBJ) $(CLIENT_OBJ) $(DIAG_OBJ) $(TEST_OBJ) $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET) $(DIAG_TARGET) $(TEST_TARGET)
 
 $(OBJDIR)/%.o : $(SRCDIR)/%.c Makefile
 	@echo compiling $< 
