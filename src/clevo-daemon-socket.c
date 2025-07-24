@@ -45,6 +45,9 @@ extern struct {
 // External function declarations
 extern int ec_write_fan_duty(int duty_percentage);
 
+// External variable declarations
+extern int max_duty_change_rate;
+
 // Simple logging function for socket server
 static void socket_log(int priority, const char* format, ...) {
     va_list args;
@@ -252,6 +255,25 @@ static int handle_client_command(int client_sock, const char* command) {
         // Get fan status only
         snprintf(response, sizeof(response), "DUTY:%d RPM:%d AUTO:%d", 
                 share_info->fan_duty, share_info->fan_rpms, share_info->auto_duty);
+        
+    } else if (strncmp(command, "SET_MAX_DUTY_CHANGE", 19) == 0) {
+        // Set maximum duty change rate
+        int rate;
+        if (sscanf(command, "SET_MAX_DUTY_CHANGE %d", &rate) == 1) {
+            if (rate >= 1 && rate <= 100) {
+                max_duty_change_rate = rate;
+                snprintf(response, sizeof(response), "OK: Max duty change rate set to %d%%", rate);
+                socket_log(LOG_INFO, "Client set max duty change rate: %d%%", rate);
+            } else {
+                snprintf(response, sizeof(response), "ERROR: Invalid max duty change rate (must be 1-100)");
+            }
+        } else {
+            snprintf(response, sizeof(response), "ERROR: Invalid SET_MAX_DUTY_CHANGE command");
+        }
+        
+    } else if (strcmp(command, "GET_MAX_DUTY_CHANGE") == 0) {
+        // Get current max duty change rate
+        snprintf(response, sizeof(response), "MAX_DUTY_CHANGE:%d", max_duty_change_rate);
         
     } else {
         snprintf(response, sizeof(response), "ERROR: Unknown command '%s'", command);

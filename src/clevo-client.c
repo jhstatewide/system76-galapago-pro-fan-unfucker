@@ -36,6 +36,8 @@ typedef enum {
     CMD_GET_TEMP,
     CMD_GET_FAN,
     CMD_TEMP_MONITOR,
+    CMD_SET_MAX_DUTY_CHANGE,
+    CMD_GET_MAX_DUTY_CHANGE,
     CMD_HELP
 } CommandType;
 
@@ -43,6 +45,7 @@ typedef struct {
     CommandType type;
     int fan_duty;
     int target_temperature;
+    int max_duty_change_rate;
     double monitor_interval;
     int verbose;
     int json_output;
@@ -243,6 +246,37 @@ int main(int argc, char* argv[]) {
             }
             break;
             
+        case CMD_SET_MAX_DUTY_CHANGE:
+            {
+                char command[64];
+                snprintf(command, sizeof(command), "SET_MAX_DUTY_CHANGE %d", config.max_duty_change_rate);
+                if (send_command(sock, command) == 0) {
+                    char response[BUFFER_SIZE];
+                    if (receive_response(sock, response, sizeof(response)) == 0) {
+                        printf("Response: %s\n", response);
+                    }
+                }
+            }
+            break;
+            
+        case CMD_GET_MAX_DUTY_CHANGE:
+            {
+                char command[64];
+                snprintf(command, sizeof(command), "GET_MAX_DUTY_CHANGE");
+                if (send_command(sock, command) == 0) {
+                    char response[BUFFER_SIZE];
+                    if (receive_response(sock, response, sizeof(response)) == 0) {
+                        int rate;
+                        if (sscanf(response, "MAX_DUTY_CHANGE:%d", &rate) == 1) {
+                            printf("Current max duty change rate: %d%%\n", rate);
+                        } else {
+                            printf("Response: %s\n", response);
+                        }
+                    }
+                }
+            }
+            break;
+            
         case CMD_HELP:
         default:
             print_help();
@@ -380,6 +414,8 @@ static void print_help(void) {
     printf("  set-target-temp TEMP Set target temperature for auto control (40-100°C)\n");
     printf("  get-temp            Get current temperatures\n");
     printf("  get-fan             Get current fan status\n");
+    printf("  set-max-duty-change RATE Set max duty change rate (1-100%%, default: 30)\n");
+    printf("  get-max-duty-change Get current max duty change rate\n");
     printf("  temp-monitor [INTERVAL] Monitor temperatures continuously (default: 2.0s)\n");
     printf("  help                Show this help message\n\n");
     printf("Options:\n");
@@ -390,6 +426,8 @@ static void print_help(void) {
     printf("  clevo-client status\n");
     printf("  clevo-client monitor 5\n");
     printf("  clevo-client set-fan 80\n");
+    printf("  clevo-client set-max-duty-change 10\n");
+    printf("  clevo-client get-max-duty-change\n");
     printf("  clevo-client --json status\n");
 }
 
@@ -466,6 +504,20 @@ static void parse_arguments(int argc, char* argv[]) {
         config.type = CMD_GET_TEMP;
     } else if (strcmp(command, "get-fan") == 0) {
         config.type = CMD_GET_FAN;
+    } else if (strcmp(command, "set-max-duty-change") == 0) {
+        config.type = CMD_SET_MAX_DUTY_CHANGE;
+        if (optind + 1 < argc) {
+            config.max_duty_change_rate = atoi(argv[optind + 1]);
+            if (config.max_duty_change_rate < 1 || config.max_duty_change_rate > 100) {
+                fprintf(stderr, "Error: Max duty change rate must be between 1 and 100\n");
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            fprintf(stderr, "Error: Max duty change rate value required\n");
+            exit(EXIT_FAILURE);
+        }
+    } else if (strcmp(command, "get-max-duty-change") == 0) {
+        config.type = CMD_GET_MAX_DUTY_CHANGE;
     } else if (strcmp(command, "temp-monitor") == 0) {
         config.type = CMD_TEMP_MONITOR;
         config.monitor_interval = 2.0; // Default 2 seconds

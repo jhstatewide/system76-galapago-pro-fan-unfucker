@@ -79,6 +79,7 @@ static double status_interval = 2.0;
 static int target_temperature = 65;
 static int daemon_mode = 0;
 static volatile int running = 1;
+int max_duty_change_rate = 30;  // Default max duty change per cycle (%)
 
 // PID Controller variables
 static double pid_kp = 4.0;  // Increased proportional gain for more aggressive response
@@ -577,7 +578,7 @@ static int ec_auto_duty_adjust(void) {
     
     // Rate limiting with emergency bypass
     int current_duty = share_info->fan_duty;
-    int max_duty_change = 30; // Increased for faster response
+    int max_duty_change = max_duty_change_rate; // Use configurable rate
     
     // Emergency bypass: Skip rate limiting for critical temperature situations
     bool emergency_bypass = (temp_error >= 8) || (temp_error >= 5 && new_duty >= 80) || temp_stuck;
@@ -764,6 +765,7 @@ static void parse_command_line(int argc, char* argv[]) {
         {"adaptive-target-performance", required_argument, 0, 'P'},
         {"fan-health-check", required_argument, 0, 'f'},
         {"fan-stuck-threshold", required_argument, 0, 's'},
+        {"max-duty-change", required_argument, 0, 'm'},
         {"help",         no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
@@ -771,7 +773,7 @@ static void parse_command_line(int argc, char* argv[]) {
     int option_index = 0;
     int c;
     
-    while ((c = getopt_long(argc, argv, "di:t:Dp:a:A:P:f:s:h?", long_options, &option_index)) != -1) {
+    while ((c = getopt_long(argc, argv, "di:t:Dp:a:A:P:f:s:m:h?", long_options, &option_index)) != -1) {
         switch (c) {
             case 'd':
                 debug_mode = 1;
@@ -820,6 +822,13 @@ static void parse_command_line(int argc, char* argv[]) {
                 if (fan_stuck_threshold < 100) fan_stuck_threshold = 100;
                 if (fan_stuck_threshold > 1000) fan_stuck_threshold = 1000;
                 break;
+            case 'm':
+                max_duty_change_rate = atoi(optarg);
+                if (max_duty_change_rate < 1 || max_duty_change_rate > 100) {
+                    printf("Invalid max duty change rate: %d (must be 1-100%%)\n", max_duty_change_rate);
+                    exit(EXIT_FAILURE);
+                }
+                break;
             case 'h':
             case '?':
                 printf(
@@ -839,6 +848,7 @@ static void parse_command_line(int argc, char* argv[]) {
                     "  -P, --adaptive-target-performance <value>\tSet target performance score (0.1-1.0, default: 0.8)\n"
                     "  -f, --fan-health-check <sec>\tSet fan health check interval (10-300s, default: 30)\n"
                     "  -s, --fan-stuck-threshold <rpm>\tSet RPM threshold for stuck fan detection (100-1000, default: 200)\n"
+                    "  -m, --max-duty-change <%%>\tSet the maximum duty change per cycle (1-100, default: 30)\n"
                     "  -h, -?, --help\tDisplay this help and exit\n"
                     "\n"
                     "Modes:\n"
