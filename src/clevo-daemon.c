@@ -403,6 +403,11 @@ static int daemon_ec_worker(void) {
         share_info->fan_rpms = ec_query_fan_rpms();
         if (debug_mode) daemon_log(LOG_DEBUG, "direct I/O: cpu_temp=%d, gpu_temp=%d, fan_duty=%d, fan_rpms=%d", 
             share_info->cpu_temp, share_info->gpu_temp, share_info->fan_duty, share_info->fan_rpms);
+        
+        // Additional debugging for temperature validation
+        if (debug_mode && share_info->gpu_temp == 0) {
+            daemon_log(LOG_DEBUG, "Warning: GPU temperature reading is 0°C - sensor may be unavailable");
+        }
     }
     
     // Check fan health
@@ -416,6 +421,11 @@ static int daemon_ec_worker(void) {
         // Emergency bypass: Always write if we're in emergency mode, even if duty hasn't changed
         int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
         bool emergency_mode = (temp >= target_temperature + 10) || (temp >= target_temperature + 5 && next_duty >= 80);
+        
+        // Log GPU temperature issues for debugging
+        if (share_info->gpu_temp == 0 && debug_mode) {
+            daemon_log(LOG_DEBUG, "GPU temperature reading is 0°C - this may indicate a sensor issue");
+        }
         
         if (next_duty != 0 && (next_duty != share_info->auto_duty_val || emergency_mode)) {
             char s_time[256];
@@ -503,7 +513,19 @@ static int ec_auto_duty_adjust(void) {
     // 6. Minimum duty: 30% when above target to ensure cooling
 
     // PID Controller implementation
-    int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+    int temp;
+    
+    // Handle case where GPU temperature is unavailable (0°C reading)
+    if (share_info->gpu_temp == 0) {
+        // Use CPU temperature only if GPU is unavailable
+        temp = share_info->cpu_temp;
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "GPU temperature unavailable (0°C), using CPU temperature only: %d°C", temp);
+        }
+    } else {
+        // Use the higher of CPU and GPU temperatures
+        temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+    }
     double setpoint = (double)target_temperature;
     double process_variable = (double)temp;
     double error = process_variable - setpoint;
@@ -601,20 +623,43 @@ static int ec_auto_duty_adjust(void) {
         double derivative = pid_kd * (error - pid_prev_error);
         
         double output = proportional + integral + derivative;
-        if (output > pid_output_max) output = pid_output_max;
-        if (output < pid_output_min) output = pid_output_min;
         
-        pid_prev_error = error;
-        new_duty = (int)(output + 0.5);
+        // For temperatures below target, we want to reduce fan speed
+        // But we need to handle the negative output properly
+        if (output < 0) {
+            // Negative output means we want to reduce fan speed
+            // Calculate how much to reduce from current duty
+            int current_duty = share_info->fan_duty;
+            int reduction = (int)(-output + 0.5); // Convert negative to positive reduction
+            
+            // Limit reduction to current duty (can't go below 0)
+            if (reduction > current_duty) {
+                reduction = current_duty;
+            }
+            
+            new_duty = current_duty - reduction;
+            
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Below target PID: temp=%d, setpoint=%.1f, error=%.1f, output=%.1f, reduction=%d, duty=%d",
+                       temp, setpoint, error, output, reduction, new_duty);
+            }
+        } else {
+            // Positive output (shouldn't happen when below target, but handle it)
+            if (output > pid_output_max) output = pid_output_max;
+            if (output < pid_output_min) output = pid_output_min;
+            new_duty = (int)(output + 0.5);
+            
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Below target PID (positive output): temp=%d, setpoint=%.1f, error=%.1f, duty=%d",
+                       temp, setpoint, error, new_duty);
+            }
+        }
         
         // Ensure duty cycle is within valid range
         if (new_duty > 100) new_duty = 100;
         if (new_duty < 0) new_duty = 0;
         
-        if (debug_mode) {
-            daemon_log(LOG_DEBUG, "Below target PID: temp=%d, setpoint=%.1f, error=%.1f, duty=%d",
-                   temp, setpoint, error, new_duty);
-        }
+        pid_prev_error = error;
     }
     
     // Stuck temperature escalation: If temperature is stuck and above target, escalate duty
@@ -632,8 +677,14 @@ static int ec_auto_duty_adjust(void) {
     int current_duty = share_info->fan_duty;
     int max_duty_change = max_duty_change_rate; // Use configurable rate
     
-    // Emergency bypass: Allow faster rate limiting for critical temperature situations
-    bool emergency_bypass = (temp_error >= 8) || (temp_error >= 5 && new_duty >= 80) || temp_stuck;
+            // Emergency bypass: Allow faster rate limiting for critical temperature situations
+        bool emergency_bypass = (temp_error >= 8) || (temp_error >= 5 && new_duty >= 80) || temp_stuck;
+        
+        // Critical bypass: For very high temperatures, bypass rate limiting entirely
+        bool critical_bypass = (temp_error >= 12) || (temp >= target_temperature + 15);
+        
+        // Cool-down bypass: For temperatures significantly below target, allow faster fan reduction
+        bool cooldown_bypass = (temp_error <= -5) || (temp <= target_temperature - 8);
     
     if (!emergency_bypass) {
         // Normal rate limiting
@@ -650,9 +701,43 @@ static int ec_auto_duty_adjust(void) {
                 daemon_log(LOG_DEBUG, "Rate limiting: limiting duty decrease from %d to %d", original_duty, new_duty);
             }
         }
+    } else if (critical_bypass) {
+        // Critical bypass: No rate limiting for extreme temperatures
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "Critical bypass: allowing full duty change from %d to %d (temp=%d, target=%d, error=%d°C)", 
+                      current_duty, new_duty, temp, target_temperature, temp_error);
+        }
+    } else if (cooldown_bypass) {
+        // Cool-down bypass: Allow faster fan reduction when temperature is well below target
+        int cooldown_max_change = max_duty_change * 3; // Allow 3x normal rate for cooldown
+        if (new_duty < current_duty - cooldown_max_change) {
+            int original_duty = new_duty;
+            new_duty = current_duty - cooldown_max_change;
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Cool-down bypass: limiting duty decrease from %d to %d (cooldown rate: %d)", 
+                          original_duty, new_duty, cooldown_max_change);
+            }
+        } else {
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Cool-down bypass: allowing duty change from %d to %d (temp=%d, target=%d, error=%d°C)", 
+                          current_duty, new_duty, temp, target_temperature, temp_error);
+            }
+        }
     } else {
-        // Emergency rate limiting: Allow twice the normal rate
-        int emergency_max_change = max_duty_change * 2;
+        // Emergency rate limiting: Allow much faster response for critical situations
+        int emergency_max_change;
+        
+        if (temp_error >= 10) {
+            // Critical emergency: Allow up to 50% change per cycle
+            emergency_max_change = 50;
+        } else if (temp_error >= 8) {
+            // High emergency: Allow up to 30% change per cycle
+            emergency_max_change = 30;
+        } else {
+            // Moderate emergency: Allow up to 20% change per cycle
+            emergency_max_change = 20;
+        }
+        
         if (new_duty > current_duty + emergency_max_change) {
             int original_duty = new_duty;
             new_duty = current_duty + emergency_max_change;
