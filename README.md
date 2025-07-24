@@ -40,6 +40,54 @@ This project now includes a modern daemon-client architecture with the following
 ./bin/clevo-daemon 80
 ```
 
+### Live Statistics Display
+
+The daemon now includes a high-performance live statistics display mode using ncurses:
+
+```bash
+# Enable live stats display (updates every 100ms)
+./bin/clevo-daemon --live-stats
+
+# Live stats with custom target temperature
+./bin/clevo-daemon --live-stats --target-temp 55
+
+# Live stats with debug output
+./bin/clevo-daemon --live-stats --debug
+```
+
+**Features:**
+- **Real-time Updates**: Refreshes every 100ms with minimal CPU usage
+- **Color-coded Display**: Green/Yellow/Red indicators for temperature and fan status
+- **Efficient Rendering**: Only updates changed values using ncurses optimization
+- **Interactive Controls**: Press 'q' to quit, 'r' to refresh display
+- **Comprehensive Stats**: Shows temperatures, fan duty/RPM, PID values, health status
+- **Terminal-friendly**: Works in any terminal emulator with proper cleanup
+
+**Display Layout:**
+```
+┌─ Clevo Fan Control Live Stats ──────────────────────────────┐
+│ Target: 60°C  │  Update: 100ms  │  PID: Enabled            │
+├───────────────────────────────────────────────────────────────┤
+│ Temperature:                                                 │
+│   CPU: 72°C  │  GPU: 68°C  │  Max: 72°C                   │
+├───────────────────────────────────────────────────────────────┤
+│ Fan Control:                                                │
+│   Duty: 45%  │  RPM: 2340  │  Health: OK                  │
+├───────────────────────────────────────────────────────────────┤
+│ PID Status:                                                 │
+│   Error: +7°C  │  P: 28.0  │  I: 2.1  │  D: 7.0            │
+├───────────────────────────────────────────────────────────────┤
+│ Status: Auto Mode  │  Stuck: No  │  Recovery: 0/3          │
+└───────────────────────────────────────────────────────────────┘
+```
+
+**Color Coding:**
+- **Green**: Normal operation
+- **Yellow**: Warning conditions (high temp, moderate fan usage)
+- **Red**: Critical conditions (very high temp, fan problems)
+- **Cyan**: Informational values
+- **White**: Headers and labels
+
 ### Client (`clevo-client`)
 Modern command-line client for monitoring and controlling the daemon:
 
@@ -128,11 +176,19 @@ sudo /opt/galago-pro-fan-control-daemon/uninstall.sh
 For manual installation to `/usr/local`:
 
 ```shell
-sudo apt-get install libappindicator3-dev libgtk-3-dev
+# Install dependencies
+sudo apt-get install libappindicator3-dev libgtk-3-dev libncurses5-dev
+
+# Build and install
 git clone https://github.com/SkyLandTW/clevo-indicator.git
 cd clevo-indicator
 make install
 ```
+
+**Dependencies:**
+- `libappindicator3-dev`: For the system tray indicator
+- `libgtk-3-dev`: For GTK+ GUI components  
+- `libncurses5-dev`: For the live statistics display mode
 
 
 Notes

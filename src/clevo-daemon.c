@@ -39,6 +39,7 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <getopt.h>
+#include <ncurses.h>
 
 #include "privilege_manager.h"
 #include "clevo-daemon-socket.h"
@@ -80,6 +81,25 @@ static int target_temperature = 65;
 static int daemon_mode = 0;
 static volatile int running = 1;
 int max_duty_change_rate = 15;  // Default max duty change per cycle (%)
+
+// Live stats mode variables
+static int live_stats_mode = 0;
+static double live_stats_interval = 0.1;  // 100ms default
+static WINDOW* live_stats_window = NULL;
+static int live_stats_initialized = 0;
+static int last_display_cpu_temp = -1;
+static int last_display_gpu_temp = -1;
+static int last_display_fan_duty = -1;
+static int last_display_fan_rpm = -1;
+static double last_display_pid_error = -999.0;
+static double last_display_pid_p = -999.0;
+static double last_display_pid_i = -999.0;
+static double last_display_pid_d = -999.0;
+
+// Debug log buffer for live stats display
+static char debug_log_buffer[10][256];  // Last 10 log messages
+static int debug_log_index = 0;
+static int debug_log_count = 0;
 
 // PID Controller variables
 static double pid_kp = 4.0;  // Increased proportional gain for more aggressive response
@@ -190,6 +210,13 @@ static int get_aggressive_duty_for_error(int temp_error);
 static bool validate_temperature_reading(int current_temp, int last_temp, const char* sensor_name);
 static int sanitize_temperature_reading(int current_temp, int last_temp, const char* sensor_name);
 
+// Live stats functions
+static void live_stats_init(void);
+static void live_stats_display(void);
+static void live_stats_cleanup(void);
+static void live_stats_handle_resize(void);
+static void live_stats_handle_input(void);
+
 
 int main(int argc, char* argv[]) {
     printf("Clevo Fan Control Daemon\n");
@@ -209,9 +236,17 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     
+    // Initialize live stats if enabled
+    if (live_stats_mode) {
+        live_stats_init();
+    }
+    
     // Test EC access
     if (ec_init() != EXIT_SUCCESS) {
         printf("unable to control EC: %s\n", strerror(errno));
+        if (live_stats_mode) {
+            live_stats_cleanup();
+        }
         return EXIT_FAILURE;
     }
     
@@ -227,8 +262,8 @@ int main(int argc, char* argv[]) {
         signal_term(&daemon_on_sigterm);
         daemon_init_share();
         
-        // Daemonize if not in debug mode
-        if (!debug_mode) {
+        // Daemonize if not in debug mode AND not in live stats mode
+        if (!debug_mode && !live_stats_mode) {
             daemonize();
         }
         
@@ -264,8 +299,8 @@ int main(int argc, char* argv[]) {
             signal_term(&daemon_on_sigterm);
             daemon_init_share();
             
-            // Daemonize if not in debug mode
-            if (!debug_mode) {
+            // Daemonize if not in debug mode AND not in live stats mode
+            if (!debug_mode && !live_stats_mode) {
                 daemonize();
             }
             
@@ -303,6 +338,11 @@ int main(int argc, char* argv[]) {
             printf("For daemon mode with default temperature: no arguments or --daemon\n");
             return EXIT_FAILURE;
         }
+    }
+    
+    // Clean up live stats if enabled
+    if (live_stats_mode) {
+        live_stats_cleanup();
     }
     
     return EXIT_SUCCESS;
@@ -437,6 +477,11 @@ static int daemon_ec_worker(void) {
         }
     }
     
+    // Update live stats display if enabled
+    if (live_stats_mode && live_stats_initialized) {
+        live_stats_display();
+    }
+    
     return EXIT_SUCCESS;
 }
 
@@ -462,6 +507,11 @@ static void daemon_on_sigterm(int signum) {
     running = 0;
     if (share_info != NULL) {
         share_info->exit = 1;
+    }
+    
+    // Clean up live stats if enabled
+    if (live_stats_mode) {
+        live_stats_cleanup();
     }
     
     // Stop socket server immediately
@@ -936,6 +986,7 @@ static void parse_command_line(int argc, char* argv[]) {
         {"max-duty-change", required_argument, 0, 'm'},
         {"temp-validation", required_argument, 0, 'v'},
         {"max-temp-change", required_argument, 0, 'T'},
+        {"live-stats",   no_argument,       0, 'L'},
         {"help",         no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
@@ -943,7 +994,7 @@ static void parse_command_line(int argc, char* argv[]) {
     int option_index = 0;
     int c;
     
-    while ((c = getopt_long(argc, argv, "di:t:Dp:a:A:P:f:s:m:v:T:h?", long_options, &option_index)) != -1) {
+    while ((c = getopt_long(argc, argv, "di:t:Dp:a:A:P:f:s:m:v:T:Lh?", long_options, &option_index)) != -1) {
         switch (c) {
             case 'd':
                 debug_mode = 1;
@@ -1009,6 +1060,12 @@ static void parse_command_line(int argc, char* argv[]) {
                     exit(EXIT_FAILURE);
                 }
                 break;
+            case 'L':
+                live_stats_mode = 1;
+                // Don't automatically enable debug mode - it interferes with ncurses display
+                // debug_mode = 1;  // Enable debug mode when live stats is enabled
+                // log_level = LOG_DEBUG;
+                break;
             case 'h':
             case '?':
                 printf(
@@ -1031,6 +1088,7 @@ static void parse_command_line(int argc, char* argv[]) {
                     "  -m, --max-duty-change <%%>\tSet the maximum duty change per cycle (1-100, default: 15)\n"
                     "  -v, --temp-validation <0|1>\tEnable/Disable temperature validation (default: 1)\n"
                     "  -T, --max-temp-change <°C>\tSet max temperature change per cycle (1-50°C, default: 10)\n"
+                    "  -L, --live-stats\tEnable live statistics display (prevents daemonization)\n"
                     "  -h, -?, --help\tDisplay this help and exit\n"
                     "\n"
                     "Modes:\n"
@@ -1049,6 +1107,7 @@ static void parse_command_line(int argc, char* argv[]) {
                     "  ./clevo-daemon 55                 # Daemon mode, target 55°C\n"
                     "  ./clevo-daemon 50                 # CLI mode, set fan to 50%%\n"
                     "  ./clevo-daemon --debug            # Daemon mode with debug output\n"
+                    "  ./clevo-daemon --live-stats       # Live statistics display\n"
                     "\n"
                     "Modern Privilege Management:\n"
                     "This program supports multiple privilege elevation methods:\n"
@@ -1111,10 +1170,28 @@ static void daemon_log(int priority, const char* format, ...) {
     
     if (priority <= log_level) {
         vsyslog(priority, format, args);
-        if (debug_mode || priority <= LOG_WARNING) {
+        // Only print to stdout if not in live stats mode (to avoid interfering with ncurses)
+        if ((debug_mode || priority <= LOG_WARNING) && !live_stats_mode) {
             vprintf(format, args);
             printf("\n");
             fflush(stdout);
+        }
+        
+        // Store log messages in debug buffer for live stats display
+        if (live_stats_mode && (debug_mode || priority <= LOG_WARNING)) {
+            char temp_buffer[256];
+            vsnprintf(temp_buffer, sizeof(temp_buffer), format, args);
+            
+            // Add timestamp
+            char timestamp[32];
+            time_t now = time(NULL);
+            strftime(timestamp, sizeof(timestamp), "%H:%M:%S", localtime(&now));
+            
+            // Store in circular buffer
+            snprintf(debug_log_buffer[debug_log_index], sizeof(debug_log_buffer[0]), 
+                    "[%s] %s", timestamp, temp_buffer);
+            debug_log_index = (debug_log_index + 1) % 10;
+            if (debug_log_count < 10) debug_log_count++;
         }
     }
     
@@ -1485,4 +1562,330 @@ static int sanitize_temperature_reading(int current_temp, int last_temp, const c
     daemon_log(LOG_WARNING, "Using last valid %s temperature: %d°C (rejected: %d°C)", 
                sensor_name, last_temp, current_temp);
     return last_temp;
+}
+
+// Live stats implementation
+static void live_stats_init(void) {
+    // Initialize ncurses
+    initscr();
+    cbreak();
+    noecho();
+    curs_set(0);  // Hide cursor
+    keypad(stdscr, TRUE);
+    nodelay(stdscr, TRUE);  // Non-blocking input
+    
+    // Enable colors if available
+    if (has_colors()) {
+        start_color();
+        init_pair(1, COLOR_GREEN, COLOR_BLACK);   // Normal
+        init_pair(2, COLOR_YELLOW, COLOR_BLACK);  // Warning
+        init_pair(3, COLOR_RED, COLOR_BLACK);     // Error
+        init_pair(4, COLOR_CYAN, COLOR_BLACK);    // Info
+        init_pair(5, COLOR_WHITE, COLOR_BLACK);   // Header
+    }
+    
+    // Create main window
+    live_stats_window = stdscr;
+    live_stats_initialized = 1;
+    
+    // Clear screen and draw initial layout
+    clear();
+    refresh();
+    
+    // Handle window resize
+    live_stats_handle_resize();
+}
+
+static void live_stats_handle_resize(void) {
+    if (!live_stats_initialized) return;
+    
+    int max_y, max_x;
+    getmaxyx(stdscr, max_y, max_x);
+    
+    // Minimum window size check
+    if (max_y < 12 || max_x < 60) {
+        clear();
+        mvprintw(max_y/2, (max_x-40)/2, "Window too small! Need 60x12 minimum");
+        refresh();
+        return;
+    }
+    
+    // Clear screen for redraw
+    clear();
+}
+
+static void live_stats_display(void) {
+    if (!live_stats_initialized) return;
+    
+    int max_y, max_x;
+    getmaxyx(stdscr, max_y, max_x);
+    
+    // Check window size - need more space if debug mode is enabled
+    int min_height = debug_mode ? 20 : 12;
+    if (max_y < min_height || max_x < 60) {
+        live_stats_handle_resize();
+        return;
+    }
+    
+    // Get current values
+    int cpu_temp = share_info->cpu_temp;
+    int gpu_temp = share_info->gpu_temp;
+    int fan_duty = share_info->fan_duty;
+    int fan_rpm = share_info->fan_rpms;
+    int max_temp = MAX(cpu_temp, gpu_temp);
+    
+    // Calculate PID values for display
+    double pid_error = 0.0, pid_p = 0.0, pid_i = 0.0, pid_d = 0.0;
+    if (pid_enabled) {
+        pid_error = (double)max_temp - (double)target_temperature;
+        pid_p = pid_kp * pid_error;
+        pid_i = pid_ki * pid_integral;
+        pid_d = pid_kd * (pid_error - pid_prev_error);
+    }
+    
+    // Draw header
+    attron(COLOR_PAIR(5) | A_BOLD);
+    mvprintw(0, 0, "+--- Clevo Fan Control Live Stats ");
+    for (int i = 32; i < max_x - 2; i++) mvprintw(0, i, "-");
+    mvprintw(0, max_x - 2, "+");
+    attroff(COLOR_PAIR(5) | A_BOLD);
+    
+    // Draw header info
+    attron(COLOR_PAIR(4));
+    mvprintw(1, 2, "Target: %d°C", target_temperature);
+    mvprintw(1, 20, "Update: %.0fms", live_stats_interval * 1000);
+    mvprintw(1, 35, "PID: %s", pid_enabled ? "Enabled" : "Disabled");
+    if (debug_mode) {
+        mvprintw(1, 50, "DEBUG: ON");
+    }
+    attroff(COLOR_PAIR(4));
+    
+    // Draw separator
+    mvprintw(2, 0, "+");
+    for (int i = 1; i < max_x - 1; i++) mvprintw(2, i, "-");
+    mvprintw(2, max_x - 1, "+");
+    
+    // Temperature section - only update if changed
+    if (cpu_temp != last_display_cpu_temp || gpu_temp != last_display_gpu_temp) {
+        mvprintw(3, 2, "Temperature:");
+        
+        // CPU temperature with color coding
+        if (cpu_temp > target_temperature + 10) {
+            attron(COLOR_PAIR(3));
+        } else if (cpu_temp > target_temperature) {
+            attron(COLOR_PAIR(2));
+        } else {
+            attron(COLOR_PAIR(1));
+        }
+        mvprintw(4, 4, "CPU: %d°C", cpu_temp);
+        attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
+        
+        // GPU temperature with color coding
+        if (gpu_temp > target_temperature + 10) {
+            attron(COLOR_PAIR(3));
+        } else if (gpu_temp > target_temperature) {
+            attron(COLOR_PAIR(2));
+        } else {
+            attron(COLOR_PAIR(1));
+        }
+        mvprintw(4, 20, "GPU: %d°C", gpu_temp);
+        attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
+        
+        // Max temperature
+        mvprintw(4, 36, "Max: %d°C", max_temp);
+        
+        last_display_cpu_temp = cpu_temp;
+        last_display_gpu_temp = gpu_temp;
+    }
+    
+    // Draw separator
+    mvprintw(5, 0, "+");
+    for (int i = 1; i < max_x - 1; i++) mvprintw(5, i, "-");
+    mvprintw(5, max_x - 1, "+");
+    
+    // Fan control section - only update if changed
+    if (fan_duty != last_display_fan_duty || fan_rpm != last_display_fan_rpm) {
+        mvprintw(6, 2, "Fan Control:");
+        
+        // Fan duty with color coding
+        if (fan_duty >= 80) {
+            attron(COLOR_PAIR(2));
+        } else if (fan_duty >= 50) {
+            attron(COLOR_PAIR(4));
+        } else {
+            attron(COLOR_PAIR(1));
+        }
+        mvprintw(7, 4, "Duty: %d%%", fan_duty);
+        attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(4));
+        
+        // Fan RPM with color coding
+        if (fan_rpm < 1000 && fan_duty > 20) {
+            attron(COLOR_PAIR(3));  // Low RPM at high duty = problem
+        } else if (fan_rpm < 2000) {
+            attron(COLOR_PAIR(2));
+        } else {
+            attron(COLOR_PAIR(1));
+        }
+        mvprintw(7, 20, "RPM: %d", fan_rpm);
+        attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
+        
+        // Fan health status
+        const char* health_status = "OK";
+        if (fan_rpm < 1000 && fan_duty > 20) {
+            health_status = "LOW";
+            attron(COLOR_PAIR(3));
+        } else if (fan_rpm < 2000 && fan_duty > 50) {
+            health_status = "WARN";
+            attron(COLOR_PAIR(2));
+        } else {
+            attron(COLOR_PAIR(1));
+        }
+        mvprintw(7, 36, "Health: %s", health_status);
+        attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
+        
+        last_display_fan_duty = fan_duty;
+        last_display_fan_rpm = fan_rpm;
+    }
+    
+    // Draw separator
+    mvprintw(8, 0, "+");
+    for (int i = 1; i < max_x - 1; i++) mvprintw(8, i, "-");
+    mvprintw(8, max_x - 1, "+");
+    
+    // PID status section - only update if changed
+    if (pid_enabled && (fabs(pid_error - last_display_pid_error) > 0.1 || 
+                       fabs(pid_p - last_display_pid_p) > 0.1 ||
+                       fabs(pid_i - last_display_pid_i) > 0.1 ||
+                       fabs(pid_d - last_display_pid_d) > 0.1)) {
+        mvprintw(9, 2, "PID Status:");
+        
+        // Error with color coding
+        if (fabs(pid_error) > 10) {
+            attron(COLOR_PAIR(3));
+        } else if (fabs(pid_error) > 5) {
+            attron(COLOR_PAIR(2));
+        } else {
+            attron(COLOR_PAIR(1));
+        }
+        mvprintw(10, 4, "Error: %+.1f°C", pid_error);
+        attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
+        
+        // PID terms
+        mvprintw(10, 20, "P: %.1f", pid_p);
+        mvprintw(10, 30, "I: %.1f", pid_i);
+        mvprintw(10, 40, "D: %.1f", pid_d);
+        
+        last_display_pid_error = pid_error;
+        last_display_pid_p = pid_p;
+        last_display_pid_i = pid_i;
+        last_display_pid_d = pid_d;
+    } else if (!pid_enabled) {
+        mvprintw(9, 2, "PID Status: Disabled");
+    }
+    
+    // Draw separator
+    mvprintw(11, 0, "+");
+    for (int i = 1; i < max_x - 1; i++) mvprintw(11, i, "-");
+    mvprintw(11, max_x - 1, "+");
+    
+    // Status section
+    mvprintw(12, 2, "Status: %s", share_info->auto_duty ? "Auto Mode" : "Manual Mode");
+    
+    // Stuck detection status
+    const char* stuck_status = is_temp_stuck() ? "Yes" : "No";
+    if (is_temp_stuck()) {
+        attron(COLOR_PAIR(2));
+    }
+    mvprintw(12, 25, "Stuck: %s", stuck_status);
+    if (is_temp_stuck()) {
+        attroff(COLOR_PAIR(2));
+    }
+    
+    // Recovery attempts
+    mvprintw(12, 40, "Recovery: %d/%d", fan_recovery_attempts, max_fan_recovery_attempts);
+    
+    // Draw footer
+    mvprintw(13, 0, "+");
+    for (int i = 1; i < max_x - 1; i++) mvprintw(13, i, "-");
+    mvprintw(13, max_x - 1, "+");
+    
+    // Debug log area (only show if debug mode is enabled)
+    if (debug_mode) {
+        // Draw debug separator
+        mvprintw(14, 0, "+");
+        for (int i = 1; i < max_x - 1; i++) mvprintw(14, i, "-");
+        mvprintw(14, max_x - 1, "+");
+        
+        // Debug log header
+        attron(COLOR_PAIR(4) | A_BOLD);
+        mvprintw(15, 2, "Debug Log:");
+        attroff(COLOR_PAIR(4) | A_BOLD);
+        
+        // Show last few debug messages
+        int log_start = debug_log_count > 0 ? (debug_log_index - 1 + 10) % 10 : 0;
+        for (int i = 0; i < debug_log_count && i < 4; i++) {
+            int log_idx = (log_start - i + 10) % 10;
+            if (log_idx >= 0 && log_idx < debug_log_count) {
+                // Truncate long messages to fit screen
+                char truncated[256];
+                strncpy(truncated, debug_log_buffer[log_idx], max_x - 4);
+                truncated[max_x - 4] = '\0';
+                mvprintw(16 + i, 2, "%s", truncated);
+            }
+        }
+        
+        // Instructions
+        attron(COLOR_PAIR(4));
+        mvprintw(20, 2, "Press 'q' to quit, 'r' to refresh display");
+        attroff(COLOR_PAIR(4));
+    } else {
+        // Instructions (when not in debug mode)
+        attron(COLOR_PAIR(4));
+        mvprintw(14, 2, "Press 'q' to quit, 'r' to refresh display");
+        attroff(COLOR_PAIR(4));
+    }
+    
+    // Handle input
+    live_stats_handle_input();
+    
+    // Refresh display
+    refresh();
+}
+
+static void live_stats_cleanup(void) {
+    if (live_stats_initialized) {
+        // Restore terminal
+        curs_set(1);  // Show cursor
+        endwin();
+        live_stats_initialized = 0;
+        live_stats_window = NULL;
+    }
+}
+
+static void live_stats_handle_input(void) {
+    // Handle input from the user
+    int ch = getch();
+    if (ch != ERR) {
+        if (ch == 'q' || ch == 'Q') {
+            running = 0;
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Received quit command from user input");
+            }
+        } else if (ch == 'r' || ch == 'R') {
+            // Force refresh by clearing display cache
+            last_display_cpu_temp = -1;
+            last_display_gpu_temp = -1;
+            last_display_fan_duty = -1;
+            last_display_fan_rpm = -1;
+            last_display_pid_error = -999.0;
+            last_display_pid_p = -999.0;
+            last_display_pid_i = -999.0;
+            last_display_pid_d = -999.0;
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Received refresh command from user input");
+            }
+        } else if (debug_mode) {
+            daemon_log(LOG_DEBUG, "Received input: %c (0x%02x)", ch, ch);
+        }
+    }
 } 

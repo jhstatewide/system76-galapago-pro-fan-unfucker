@@ -111,7 +111,7 @@ $(TARGET): $(OBJ) Makefile
 $(DAEMON_TARGET): $(DAEMON_OBJ) Makefile
 	@mkdir -p bin
 	@echo linking $(DAEMON_TARGET) from $(DAEMON_OBJ)
-	@$(CC) $(DAEMON_OBJ) -o $(DAEMON_TARGET) $(LDFLAGS) -lm -lpthread
+	@$(CC) $(DAEMON_OBJ) -o $(DAEMON_TARGET) $(LDFLAGS) -lm -lpthread -lncurses
 
 $(CLIENT_TARGET): $(CLIENT_OBJ) Makefile
 	@mkdir -p bin
