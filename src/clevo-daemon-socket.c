@@ -24,6 +24,7 @@
 #include <pthread.h>
 #include <syslog.h>
 #include <stdarg.h>
+#include <time.h>
 
 #define SOCKET_PATH "/tmp/clevo-daemon.sock"
 #define MAX_CLIENTS 10
@@ -110,6 +111,7 @@ int init_socket_server(void) {
     // Set up signal handling for cleanup
     signal(SIGTERM, socket_signal_handler);
     signal(SIGINT, socket_signal_handler);
+    signal(SIGQUIT, socket_signal_handler);
     
     // Start socket server thread
     if (pthread_create(&socket_thread, NULL, socket_server_thread, NULL) != 0) {
@@ -125,14 +127,16 @@ int init_socket_server(void) {
 void stop_socket_server(void) {
     socket_running = 0;
     
-    // Close server socket to wake up thread
+    // Close server socket to wake up thread immediately
     if (server_sock >= 0) {
         close(server_sock);
         server_sock = -1;
     }
     
-    // Wait for thread to finish
+    // Wait for thread to finish with timeout
     if (socket_thread) {
+        // Use a simple approach - just cancel and join
+        pthread_cancel(socket_thread);
         pthread_join(socket_thread, NULL);
     }
     
@@ -152,8 +156,8 @@ static void* socket_server_thread(void* arg) {
         FD_ZERO(&read_fds);
         FD_SET(server_sock, &read_fds);
         
-        timeout.tv_sec = 1;
-        timeout.tv_usec = 0;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 100000; // 0.1 second timeout for more responsive signal handling
         
         int activity = select(server_sock + 1, &read_fds, NULL, NULL, &timeout);
         
@@ -293,7 +297,10 @@ static int send_response(int client_sock, const char* response) {
 
 static void socket_signal_handler(int sig) {
     (void)sig;
+    socket_log(LOG_INFO, "Socket server received signal %s, shutting down", strsignal(sig));
     socket_running = 0;
+    // Force immediate exit to avoid waiting for select timeout
+    exit(EXIT_SUCCESS);
 }
 
 // This function is kept for potential future use

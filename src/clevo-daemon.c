@@ -270,7 +270,16 @@ int main(int argc, char* argv[]) {
             // Run the main daemon loop
             while (running) {
                 daemon_ec_worker();
-                usleep((int)(status_interval * 1000000)); // Convert to microseconds
+                
+                // Use shorter sleep intervals to check for signals more frequently
+                int sleep_us = (int)(status_interval * 1000000);
+                int check_interval = 100000; // Check every 0.1 seconds
+                
+                while (sleep_us > 0 && running) {
+                    int sleep_chunk = (sleep_us > check_interval) ? check_interval : sleep_us;
+                    usleep(sleep_chunk);
+                    sleep_us -= sleep_chunk;
+                }
             }
             
             // Stop socket server
@@ -402,11 +411,17 @@ static int daemon_test_fan(int duty_percentage) {
 }
 
 static void daemon_on_sigterm(int signum) {
-    daemon_log(LOG_INFO, "Received signal %s, shutting down", strsignal(signum));
+    daemon_log(LOG_INFO, "Received signal %s, shutting down immediately", strsignal(signum));
     running = 0;
     if (share_info != NULL) {
         share_info->exit = 1;
     }
+    
+    // Stop socket server immediately
+    stop_socket_server();
+    
+    // Force immediate exit to avoid waiting for sleep
+    exit(EXIT_SUCCESS);
 }
 
 
