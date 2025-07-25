@@ -26,7 +26,7 @@
 #include <stdarg.h>
 #include <time.h>
 
-#define SOCKET_PATH "/tmp/clevo-daemon.sock"
+#define SOCKET_PATH "/run/clevo-daemon.sock"
 #define MAX_CLIENTS 10
 #define BUFFER_SIZE 1024
 

@@ -22,8 +22,9 @@
 #include <signal.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <ncurses.h>
 
-#define SOCKET_PATH "/tmp/clevo-daemon.sock"
+#define SOCKET_PATH "/run/clevo-daemon.sock"
 #define BUFFER_SIZE 1024
 #define MAX_RETRIES 3
 
@@ -42,6 +43,7 @@ typedef enum {
     CMD_GET_MAX_DUTY_INCREASE,
     CMD_SET_MAX_DUTY_DECREASE,
     CMD_GET_MAX_DUTY_DECREASE,
+    CMD_LIVE_STATS,
     CMD_HELP
 } CommandType;
 
@@ -55,6 +57,7 @@ typedef struct {
     double monitor_interval;
     int verbose;
     int json_output;
+    int live_stats_mode;
 } ClientConfig;
 
 static ClientConfig config = {0};
@@ -70,6 +73,21 @@ static void signal_handler(int sig);
 static void monitor_loop(int sock);
 static void parse_arguments(int argc, char* argv[]);
 static int format_json_status(const char* response, char* json_buffer, size_t size);
+
+// Live stats variables
+static WINDOW* live_stats_window = NULL;
+static int live_stats_initialized = 0;
+static int last_display_cpu_temp = -1;
+static int last_display_gpu_temp = -1;
+static int last_display_fan_duty = -1;
+static int last_display_fan_rpm = -1;
+
+// Live stats function declarations
+static void live_stats_init(void);
+static void live_stats_display(int sock);
+static void live_stats_cleanup(void);
+static void live_stats_handle_resize(void);
+static void live_stats_handle_input(void);
 
 int main(int argc, char* argv[]) {
     printf("Clevo Fan Control Client v1.0\n");
@@ -337,6 +355,14 @@ int main(int argc, char* argv[]) {
             }
             break;
         }
+        case CMD_LIVE_STATS:
+            live_stats_init();
+            while (running) {
+                live_stats_display(sock);
+                usleep((int)(config.monitor_interval * 1000000));
+            }
+            live_stats_cleanup();
+            break;
             
         case CMD_HELP:
         default:
@@ -470,6 +496,7 @@ static void print_help(void) {
     printf("Commands:\n");
     printf("  status              Show current fan control status\n");
     printf("  monitor [INTERVAL]  Continuously monitor status (default: 2.0s)\n");
+    printf("  live-stats [INTERVAL] Live statistics display (default: 0.1s)\n");
     printf("  set-fan DUTY        Set fan duty cycle (1-100%%)\n");
     printf("  set-auto            Enable automatic fan control\n");
     printf("  set-target-temp TEMP Set target temperature for auto control (40-100°C)\n");
@@ -490,6 +517,7 @@ static void print_help(void) {
     printf("Examples:\n");
     printf("  clevo-client status\n");
     printf("  clevo-client monitor 5\n");
+    printf("  clevo-client live-stats 0.1\n");
     printf("  clevo-client set-fan 80\n");
     printf("  clevo-client set-max-duty-change 10\n");
     printf("  clevo-client get-max-duty-change\n");
@@ -538,6 +566,14 @@ static void parse_arguments(int argc, char* argv[]) {
         if (optind + 1 < argc) {
             config.monitor_interval = atof(argv[optind + 1]);
             if (config.monitor_interval < 0.1) config.monitor_interval = 0.1;
+        }
+    } else if (strcmp(command, "live-stats") == 0) {
+        config.type = CMD_LIVE_STATS;
+        config.live_stats_mode = 1;
+        config.monitor_interval = 0.1; // Default 100ms for live stats
+        if (optind + 1 < argc) {
+            config.monitor_interval = atof(argv[optind + 1]);
+            if (config.monitor_interval < 0.05) config.monitor_interval = 0.05;
         }
     } else if (strcmp(command, "set-fan") == 0) {
         config.type = CMD_SET_FAN;
@@ -646,4 +682,236 @@ static int format_json_status(const char* response, char* json_buffer, size_t si
     }
     
     return -1;
+} 
+
+// Live stats implementation
+static void live_stats_init(void) {
+    // Initialize ncurses
+    initscr();
+    cbreak();
+    noecho();
+    curs_set(0);  // Hide cursor
+    keypad(stdscr, TRUE);
+    nodelay(stdscr, TRUE);  // Non-blocking input
+    
+    // Enable colors if available
+    if (has_colors()) {
+        start_color();
+        init_pair(1, COLOR_GREEN, COLOR_BLACK);   // Normal
+        init_pair(2, COLOR_YELLOW, COLOR_BLACK);  // Warning
+        init_pair(3, COLOR_RED, COLOR_BLACK);     // Error
+        init_pair(4, COLOR_CYAN, COLOR_BLACK);    // Info
+        init_pair(5, COLOR_WHITE, COLOR_BLACK);   // Header
+    }
+    
+    // Create main window
+    live_stats_window = stdscr;
+    live_stats_initialized = 1;
+    
+    // Clear screen and draw initial layout
+    clear();
+    refresh();
+    
+    // Handle window resize
+    live_stats_handle_resize();
+}
+
+static void live_stats_handle_resize(void) {
+    if (!live_stats_initialized) return;
+    
+    int max_y, max_x;
+    getmaxyx(stdscr, max_y, max_x);
+    
+    // Minimum window size check
+    if (max_y < 12 || max_x < 60) {
+        clear();
+        mvprintw(max_y/2, (max_x-40)/2, "Window too small! Need 60x12 minimum");
+        refresh();
+        return;
+    }
+    
+    // Clear screen for redraw
+    clear();
+}
+
+static void live_stats_display(int sock) {
+    if (!live_stats_initialized) return;
+    
+    int max_y, max_x;
+    getmaxyx(stdscr, max_y, max_x);
+    
+    // Check window size
+    if (max_y < 12 || max_x < 60) {
+        live_stats_handle_resize();
+        return;
+    }
+    
+    // Get current status from daemon
+    char command[64];
+    snprintf(command, sizeof(command), "STATUS");
+    char response[BUFFER_SIZE];
+    
+    if (send_command(sock, command) == 0 && receive_response(sock, response, sizeof(response)) == 0) {
+        // Parse response
+        int cpu_temp, gpu_temp, fan_duty, fan_rpm, auto_mode;
+        if (sscanf(response, "CPU:%d GPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d", 
+                    &cpu_temp, &gpu_temp, &fan_duty, &fan_rpm, &auto_mode) == 5) {
+            
+            int max_temp = (cpu_temp > gpu_temp) ? cpu_temp : gpu_temp;
+            
+            // Draw header
+            attron(COLOR_PAIR(5) | A_BOLD);
+            mvprintw(0, 0, "+--- Clevo Fan Control Client Live Stats ");
+            for (int i = 37; i < max_x - 2; i++) mvprintw(0, i, "-");
+            mvprintw(0, max_x - 2, "+");
+            attroff(COLOR_PAIR(5) | A_BOLD);
+            
+            // Draw header info
+            attron(COLOR_PAIR(4));
+            mvprintw(1, 2, "Update: %5.0fms            ", config.monitor_interval * 1000);
+            mvprintw(1, 30, "Mode: %-8s            ", auto_mode ? "Auto" : "Manual");
+            attroff(COLOR_PAIR(4));
+            
+            // Draw separator
+            mvprintw(2, 0, "+");
+            for (int i = 1; i < max_x - 1; i++) mvprintw(2, i, "-");
+            mvprintw(2, max_x - 1, "+");
+            
+            // Temperature section - only update if changed
+            if (cpu_temp != last_display_cpu_temp || gpu_temp != last_display_gpu_temp) {
+                mvprintw(3, 2, "Temperature:                                ");
+                // CPU temperature with color coding
+                if (cpu_temp >= 80) {
+                    attron(COLOR_PAIR(3));
+                } else if (cpu_temp >= 70) {
+                    attron(COLOR_PAIR(2));
+                } else {
+                    attron(COLOR_PAIR(1));
+                }
+                mvprintw(4, 4, "CPU: %3d°C            ", cpu_temp);
+                attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
+                // GPU temperature with color coding
+                if (gpu_temp >= 80) {
+                    attron(COLOR_PAIR(3));
+                } else if (gpu_temp >= 70) {
+                    attron(COLOR_PAIR(2));
+                } else {
+                    attron(COLOR_PAIR(1));
+                }
+                mvprintw(4, 30, "GPU: %3d°C            ", gpu_temp);
+                attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
+                // Max temperature
+                mvprintw(4, 56, "Max: %3d°C            ", max_temp);
+                last_display_cpu_temp = cpu_temp;
+                last_display_gpu_temp = gpu_temp;
+            }
+            
+            // Draw separator
+            mvprintw(5, 0, "+");
+            for (int i = 1; i < max_x - 1; i++) mvprintw(5, i, "-");
+            mvprintw(5, max_x - 1, "+");
+            
+            // Fan control section - only update if changed
+            if (fan_duty != last_display_fan_duty || fan_rpm != last_display_fan_rpm) {
+                mvprintw(6, 2, "Fan Control:                                ");
+                // Fan duty with color coding
+                if (fan_duty >= 80) {
+                    attron(COLOR_PAIR(2));
+                } else if (fan_duty >= 50) {
+                    attron(COLOR_PAIR(4));
+                } else {
+                    attron(COLOR_PAIR(1));
+                }
+                mvprintw(7, 4, "Duty: %3d%%            ", fan_duty);
+                attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(4));
+                // Fan RPM with color coding
+                if (fan_rpm < 1000 && fan_duty > 20) {
+                    attron(COLOR_PAIR(3));
+                } else if (fan_rpm < 2000) {
+                    attron(COLOR_PAIR(2));
+                } else {
+                    attron(COLOR_PAIR(1));
+                }
+                mvprintw(7, 30, "RPM: %5d            ", fan_rpm);
+                attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
+                // Fan health status
+                const char* health_status = "OK";
+                if (fan_rpm < 1000 && fan_duty > 20) {
+                    health_status = "LOW";
+                } else if (fan_rpm < 2000 && fan_duty > 50) {
+                    health_status = "WARN";
+                }
+                mvprintw(7, 56, "Health: %-5s            ", health_status);
+                last_display_fan_duty = fan_duty;
+                last_display_fan_rpm = fan_rpm;
+            }
+            
+            // Draw separator
+            mvprintw(8, 0, "+");
+            for (int i = 1; i < max_x - 1; i++) mvprintw(8, i, "-");
+            mvprintw(8, max_x - 1, "+");
+            
+            // Status section
+            mvprintw(9, 2, "Status: %-10s            ", auto_mode ? "Auto Mode" : "Manual Mode");
+            
+            // Temperature status
+            const char* temp_status = "NORMAL";
+            if (max_temp >= 80) {
+                temp_status = "CRITICAL";
+                attron(COLOR_PAIR(3));
+            } else if (max_temp >= 70) {
+                temp_status = "HIGH";
+                attron(COLOR_PAIR(2));
+            } else if (max_temp >= 60) {
+                temp_status = "WARM";
+                attron(COLOR_PAIR(4));
+            } else {
+                attron(COLOR_PAIR(1));
+            }
+            mvprintw(9, 30, "Temp: %-8s            ", temp_status);
+            attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3) | COLOR_PAIR(4));
+            
+            // Draw footer
+            mvprintw(10, 0, "+");
+            for (int i = 1; i < max_x - 1; i++) mvprintw(10, i, "-");
+            mvprintw(10, max_x - 1, "+");
+            
+            // Instructions
+            attron(COLOR_PAIR(4));
+            mvprintw(11, 2, "Press 'q' to quit, 'r' to refresh display");
+            attroff(COLOR_PAIR(4));
+        }
+    }
+    
+    // Handle input
+    live_stats_handle_input();
+    
+    // Refresh display
+    refresh();
+}
+
+static void live_stats_cleanup(void) {
+    if (live_stats_initialized) {
+        // Restore terminal
+        curs_set(1);  // Show cursor
+        endwin();
+        live_stats_initialized = 0;
+        live_stats_window = NULL;
+    }
+}
+
+static void live_stats_handle_input(void) {
+    // Handle input from the user
+    int ch = getch();
+    if (ch != ERR) {
+        if (ch == 'q' || ch == 'Q') {
+            running = 0;
+        } else if (ch == 'r' || ch == 'R') {
+            // Force refresh by clearing display cache
+            last_display_cpu_temp = -1;
+            last_display_gpu_temp = -1;
+            last_display_fan_duty = -1;
+            last_display_fan_rpm = -1;
+        }
+    }
 } 

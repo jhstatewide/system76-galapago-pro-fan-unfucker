@@ -167,6 +167,9 @@ struct {
     volatile int manual_prev_fan_duty;
 } *share_info = NULL;
 
+// Add global variable for quiet mode
+static int quiet_mode = 0;
+
 // Function declarations
 static void daemon_init_share(void);
 static int daemon_ec_worker(void);
@@ -993,13 +996,15 @@ static void parse_command_line(int argc, char* argv[]) {
         {"help",         no_argument,       0, 'h'},
         {"max-increase-rate", required_argument, 0, 0x100},
         {"max-decrease-rate", required_argument, 0, 0x101},
+        {"quiet", no_argument, 0, 'q'},
+        {"log-level", required_argument, 0, 0x200},
         {0, 0, 0, 0}
     };
     
     int option_index = 0;
     int c;
     
-    while ((c = getopt_long(argc, argv, "di:t:Dp:a:A:P:f:s:m:v:T:Lh?", long_options, &option_index)) != -1) {
+    while ((c = getopt_long(argc, argv, "di:t:Dp:a:A:P:f:s:m:v:T:Lh?q", long_options, &option_index)) != -1) {
         switch (c) {
             case 'd':
                 debug_mode = 1;
@@ -1097,6 +1102,8 @@ static void parse_command_line(int argc, char* argv[]) {
                     "  -h, -?, --help\tDisplay this help and exit\n"
                     "  --max-increase-rate <%%>   Set max fan duty increase per cycle (1-100, default: 10)\n"
                     "  --max-decrease-rate <%%>   Set max fan duty decrease per cycle (1-100, default: 30)\n"
+                    "  -q, --quiet                Suppress all logging except errors\n"
+                    "  --log-level LEVEL          Set log level: error, warning, info, debug\n"
                     "\n"
                     "Modes:\n"
                     "  Daemon Mode (default):\n"
@@ -1148,6 +1155,24 @@ static void parse_command_line(int argc, char* argv[]) {
                     exit(EXIT_FAILURE);
                 }
                 break;
+            case 'q':
+                quiet_mode = 1;
+                log_level = LOG_ERR;
+                break;
+            case 0x200: // --log-level
+                if (strcmp(optarg, "error") == 0) {
+                    log_level = LOG_ERR;
+                } else if (strcmp(optarg, "warning") == 0) {
+                    log_level = LOG_WARNING;
+                } else if (strcmp(optarg, "info") == 0) {
+                    log_level = LOG_INFO;
+                } else if (strcmp(optarg, "debug") == 0) {
+                    log_level = LOG_DEBUG;
+                } else {
+                    printf("Invalid log level: %s (must be error, warning, info, or debug)\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
+                break;
             default:
                 printf("Unknown option: %c\n", c);
                 exit(EXIT_FAILURE);
@@ -1186,9 +1211,11 @@ static void show_privilege_help(void) {
 }
 
 static void daemon_log(int priority, const char* format, ...) {
+    if (quiet_mode && priority > LOG_ERR) {
+        return;
+    }
     va_list args;
     va_start(args, format);
-    
     if (priority <= log_level) {
         vsyslog(priority, format, args);
         // Only print to stdout if not in live stats mode (to avoid interfering with ncurses)
@@ -1197,17 +1224,14 @@ static void daemon_log(int priority, const char* format, ...) {
             printf("\n");
             fflush(stdout);
         }
-        
         // Store log messages in debug buffer for live stats display
         if (live_stats_mode && (debug_mode || priority <= LOG_WARNING)) {
             char temp_buffer[256];
             vsnprintf(temp_buffer, sizeof(temp_buffer), format, args);
-            
             // Add timestamp
             char timestamp[32];
             time_t now = time(NULL);
             strftime(timestamp, sizeof(timestamp), "%H:%M:%S", localtime(&now));
-            
             // Store in circular buffer
             snprintf(debug_log_buffer[debug_log_index], sizeof(debug_log_buffer[0]), 
                     "[%s] %s", timestamp, temp_buffer);
@@ -1215,7 +1239,6 @@ static void daemon_log(int priority, const char* format, ...) {
             if (debug_log_count < 10) debug_log_count++;
         }
     }
-    
     va_end(args);
 } 
 
