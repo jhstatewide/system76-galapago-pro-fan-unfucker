@@ -48,6 +48,8 @@ extern int ec_write_fan_duty(int duty_percentage);
 
 // External variable declarations
 extern int max_duty_change_rate;
+extern int max_duty_increase_rate;
+extern int max_duty_decrease_rate;
 
 // Simple logging function for socket server
 static void socket_log(int priority, const char* format, ...) {
@@ -278,6 +280,37 @@ static int handle_client_command(int client_sock, const char* command) {
     } else if (strcmp(command, "GET_MAX_DUTY_CHANGE") == 0) {
         // Get current max duty change rate
         snprintf(response, sizeof(response), "MAX_DUTY_CHANGE:%d", max_duty_change_rate);
+        
+    } else if (strncmp(command, "SET_MAX_DUTY_INCREASE", 21) == 0) {
+        int rate;
+        if (sscanf(command, "SET_MAX_DUTY_INCREASE %d", &rate) == 1) {
+            if (rate >= 1 && rate <= 100) {
+                max_duty_increase_rate = rate;
+                snprintf(response, sizeof(response), "OK: Max duty increase rate set to %d%%", rate);
+                socket_log(LOG_INFO, "Client set max duty increase rate: %d%%", rate);
+            } else {
+                snprintf(response, sizeof(response), "ERROR: Invalid max duty increase rate (must be 1-100)");
+            }
+        } else {
+            snprintf(response, sizeof(response), "ERROR: Invalid SET_MAX_DUTY_INCREASE command");
+        }
+    } else if (strcmp(command, "GET_MAX_DUTY_INCREASE") == 0) {
+        snprintf(response, sizeof(response), "MAX_DUTY_INCREASE:%d", max_duty_increase_rate);
+    } else if (strncmp(command, "SET_MAX_DUTY_DECREASE", 21) == 0) {
+        int rate;
+        if (sscanf(command, "SET_MAX_DUTY_DECREASE %d", &rate) == 1) {
+            if (rate >= 1 && rate <= 100) {
+                max_duty_decrease_rate = rate;
+                snprintf(response, sizeof(response), "OK: Max duty decrease rate set to %d%%", rate);
+                socket_log(LOG_INFO, "Client set max duty decrease rate: %d%%", rate);
+            } else {
+                snprintf(response, sizeof(response), "ERROR: Invalid max duty decrease rate (must be 1-100)");
+            }
+        } else {
+            snprintf(response, sizeof(response), "ERROR: Invalid SET_MAX_DUTY_DECREASE command");
+        }
+    } else if (strcmp(command, "GET_MAX_DUTY_DECREASE") == 0) {
+        snprintf(response, sizeof(response), "MAX_DUTY_DECREASE:%d", max_duty_decrease_rate);
         
     } else {
         snprintf(response, sizeof(response), "ERROR: Unknown command '%s'", command);

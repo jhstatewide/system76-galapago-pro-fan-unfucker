@@ -38,6 +38,10 @@ typedef enum {
     CMD_TEMP_MONITOR,
     CMD_SET_MAX_DUTY_CHANGE,
     CMD_GET_MAX_DUTY_CHANGE,
+    CMD_SET_MAX_DUTY_INCREASE,
+    CMD_GET_MAX_DUTY_INCREASE,
+    CMD_SET_MAX_DUTY_DECREASE,
+    CMD_GET_MAX_DUTY_DECREASE,
     CMD_HELP
 } CommandType;
 
@@ -46,6 +50,8 @@ typedef struct {
     int fan_duty;
     int target_temperature;
     int max_duty_change_rate;
+    int max_duty_increase_rate;
+    int max_duty_decrease_rate;
     double monitor_interval;
     int verbose;
     int json_output;
@@ -277,6 +283,61 @@ int main(int argc, char* argv[]) {
             }
             break;
             
+        case CMD_SET_MAX_DUTY_INCREASE: {
+            char command[64];
+            snprintf(command, sizeof(command), "SET_MAX_DUTY_INCREASE %d", config.max_duty_increase_rate);
+            if (send_command(sock, command) == 0) {
+                char response[BUFFER_SIZE];
+                if (receive_response(sock, response, sizeof(response)) == 0) {
+                    printf("Response: %s\n", response);
+                }
+            }
+            break;
+        }
+        case CMD_GET_MAX_DUTY_INCREASE: {
+            char command[64];
+            snprintf(command, sizeof(command), "GET_MAX_DUTY_INCREASE");
+            if (send_command(sock, command) == 0) {
+                char response[BUFFER_SIZE];
+                if (receive_response(sock, response, sizeof(response)) == 0) {
+                    int rate;
+                    if (sscanf(response, "MAX_DUTY_INCREASE:%d", &rate) == 1) {
+                        printf("Current max duty increase rate: %d%%\n", rate);
+                    } else {
+                        printf("Response: %s\n", response);
+                    }
+                }
+            }
+            break;
+        }
+        case CMD_SET_MAX_DUTY_DECREASE: {
+            char command[64];
+            snprintf(command, sizeof(command), "SET_MAX_DUTY_DECREASE %d", config.max_duty_decrease_rate);
+            if (send_command(sock, command) == 0) {
+                char response[BUFFER_SIZE];
+                if (receive_response(sock, response, sizeof(response)) == 0) {
+                    printf("Response: %s\n", response);
+                }
+            }
+            break;
+        }
+        case CMD_GET_MAX_DUTY_DECREASE: {
+            char command[64];
+            snprintf(command, sizeof(command), "GET_MAX_DUTY_DECREASE");
+            if (send_command(sock, command) == 0) {
+                char response[BUFFER_SIZE];
+                if (receive_response(sock, response, sizeof(response)) == 0) {
+                    int rate;
+                    if (sscanf(response, "MAX_DUTY_DECREASE:%d", &rate) == 1) {
+                        printf("Current max duty decrease rate: %d%%\n", rate);
+                    } else {
+                        printf("Response: %s\n", response);
+                    }
+                }
+            }
+            break;
+        }
+            
         case CMD_HELP:
         default:
             print_help();
@@ -416,6 +477,10 @@ static void print_help(void) {
     printf("  get-fan             Get current fan status\n");
     printf("  set-max-duty-change RATE Set max duty change rate (1-100%%, default: 30)\n");
     printf("  get-max-duty-change Get current max duty change rate\n");
+    printf("  set-max-increase-rate N   Set max fan duty increase per cycle (1-100)\n");
+    printf("  set-max-decrease-rate N   Set max fan duty decrease per cycle (1-100)\n");
+    printf("  get-max-increase-rate     Show current max fan duty increase per cycle\n");
+    printf("  get-max-decrease-rate     Show current max fan duty decrease per cycle\n");
     printf("  temp-monitor [INTERVAL] Monitor temperatures continuously (default: 2.0s)\n");
     printf("  help                Show this help message\n\n");
     printf("Options:\n");
@@ -518,6 +583,34 @@ static void parse_arguments(int argc, char* argv[]) {
         }
     } else if (strcmp(command, "get-max-duty-change") == 0) {
         config.type = CMD_GET_MAX_DUTY_CHANGE;
+    } else if (strcmp(command, "set-max-increase-rate") == 0) {
+        config.type = CMD_SET_MAX_DUTY_INCREASE;
+        if (optind + 1 < argc) {
+            config.max_duty_increase_rate = atoi(argv[optind + 1]);
+            if (config.max_duty_increase_rate < 1 || config.max_duty_increase_rate > 100) {
+                fprintf(stderr, "Error: Max duty increase rate must be between 1 and 100\n");
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            fprintf(stderr, "Error: Max duty increase rate value required\n");
+            exit(EXIT_FAILURE);
+        }
+    } else if (strcmp(command, "set-max-decrease-rate") == 0) {
+        config.type = CMD_SET_MAX_DUTY_DECREASE;
+        if (optind + 1 < argc) {
+            config.max_duty_decrease_rate = atoi(argv[optind + 1]);
+            if (config.max_duty_decrease_rate < 1 || config.max_duty_decrease_rate > 100) {
+                fprintf(stderr, "Error: Max duty decrease rate must be between 1 and 100\n");
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            fprintf(stderr, "Error: Max duty decrease rate value required\n");
+            exit(EXIT_FAILURE);
+        }
+    } else if (strcmp(command, "get-max-increase-rate") == 0) {
+        config.type = CMD_GET_MAX_DUTY_INCREASE;
+    } else if (strcmp(command, "get-max-decrease-rate") == 0) {
+        config.type = CMD_GET_MAX_DUTY_DECREASE;
     } else if (strcmp(command, "temp-monitor") == 0) {
         config.type = CMD_TEMP_MONITOR;
         config.monitor_interval = 2.0; // Default 2 seconds

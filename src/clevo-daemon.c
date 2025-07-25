@@ -81,6 +81,8 @@ static int target_temperature = 65;
 static int daemon_mode = 0;
 static volatile int running = 1;
 int max_duty_change_rate = 15;  // Default max duty change per cycle (%)
+int max_duty_increase_rate = 10;  // Default max increase per cycle (%)
+int max_duty_decrease_rate = 30;  // Default max decrease per cycle (%)
 
 // Live stats mode variables
 static int live_stats_mode = 0;
@@ -725,7 +727,8 @@ static int ec_auto_duty_adjust(void) {
     
     // Rate limiting with emergency bypass
     int current_duty = share_info->fan_duty;
-    int max_duty_change = max_duty_change_rate; // Use configurable rate
+    int max_increase = max_duty_increase_rate;
+    int max_decrease = max_duty_decrease_rate;
     
     // Emergency bypass: Allow faster rate limiting for critical temperature situations
     bool emergency_bypass = (temp_error >= 8) || (temp_error >= 5 && new_duty >= 80) || temp_stuck;
@@ -744,17 +747,17 @@ static int ec_auto_duty_adjust(void) {
     
     if (!emergency_bypass) {
         // Normal rate limiting
-        if (new_duty > current_duty + max_duty_change) {
+        if (new_duty > current_duty + max_increase) {
             int original_duty = new_duty;
-            new_duty = current_duty + max_duty_change;
+            new_duty = current_duty + max_increase;
             if (debug_mode) {
-                daemon_log(LOG_DEBUG, "Normal rate limiting: limiting duty increase from %d to %d (max_change=%d)", original_duty, new_duty, max_duty_change);
+                daemon_log(LOG_DEBUG, "Normal rate limiting: limiting duty increase from %d to %d (max_increase=%d)", original_duty, new_duty, max_increase);
             }
-        } else if (new_duty < current_duty - max_duty_change) {
+        } else if (new_duty < current_duty - max_decrease) {
             int original_duty = new_duty;
-            new_duty = current_duty - max_duty_change;
+            new_duty = current_duty - max_decrease;
             if (debug_mode) {
-                daemon_log(LOG_DEBUG, "Normal rate limiting: limiting duty decrease from %d to %d (max_change=%d)", original_duty, new_duty, max_duty_change);
+                daemon_log(LOG_DEBUG, "Normal rate limiting: limiting duty decrease from %d to %d (max_decrease=%d)", original_duty, new_duty, max_decrease);
             }
         } else {
             if (debug_mode) {
@@ -769,7 +772,7 @@ static int ec_auto_duty_adjust(void) {
         }
     } else if (cooldown_bypass) {
         // Cool-down bypass: Allow faster fan reduction when temperature is well below target
-        int cooldown_max_change = max_duty_change * 2; // Allow 2x normal rate for cooldown (reduced from 3x)
+        int cooldown_max_change = max_decrease * 2; // Allow 2x normal decrease rate for cooldown
         if (new_duty < current_duty - cooldown_max_change) {
             int original_duty = new_duty;
             new_duty = current_duty - cooldown_max_change;
@@ -988,6 +991,8 @@ static void parse_command_line(int argc, char* argv[]) {
         {"max-temp-change", required_argument, 0, 'T'},
         {"live-stats",   no_argument,       0, 'L'},
         {"help",         no_argument,       0, 'h'},
+        {"max-increase-rate", required_argument, 0, 0x100},
+        {"max-decrease-rate", required_argument, 0, 0x101},
         {0, 0, 0, 0}
     };
     
@@ -1090,6 +1095,8 @@ static void parse_command_line(int argc, char* argv[]) {
                     "  -T, --max-temp-change <°C>\tSet max temperature change per cycle (1-50°C, default: 10)\n"
                     "  -L, --live-stats\tEnable live statistics display (prevents daemonization)\n"
                     "  -h, -?, --help\tDisplay this help and exit\n"
+                    "  --max-increase-rate <%%>   Set max fan duty increase per cycle (1-100, default: 10)\n"
+                    "  --max-decrease-rate <%%>   Set max fan duty decrease per cycle (1-100, default: 30)\n"
                     "\n"
                     "Modes:\n"
                     "  Daemon Mode (default):\n"
@@ -1127,6 +1134,20 @@ static void parse_command_line(int argc, char* argv[]) {
                     "\n"
                 );
                 exit(EXIT_SUCCESS);
+            case 0x100: // --max-increase-rate
+                max_duty_increase_rate = atoi(optarg);
+                if (max_duty_increase_rate < 1 || max_duty_increase_rate > 100) {
+                    printf("Invalid max increase rate: %d (must be 1-100%%)\n", max_duty_increase_rate);
+                    exit(EXIT_FAILURE);
+                }
+                break;
+            case 0x101: // --max-decrease-rate
+                max_duty_decrease_rate = atoi(optarg);
+                if (max_duty_decrease_rate < 1 || max_duty_decrease_rate > 100) {
+                    printf("Invalid max decrease rate: %d (must be 1-100%%)\n", max_duty_decrease_rate);
+                    exit(EXIT_FAILURE);
+                }
+                break;
             default:
                 printf("Unknown option: %c\n", c);
                 exit(EXIT_FAILURE);
@@ -1652,11 +1673,11 @@ static void live_stats_display(void) {
     
     // Draw header info
     attron(COLOR_PAIR(4));
-    mvprintw(1, 2, "Target: %d°C", target_temperature);
-    mvprintw(1, 20, "Update: %.0fms", live_stats_interval * 1000);
-    mvprintw(1, 35, "PID: %s", pid_enabled ? "Enabled" : "Disabled");
+    mvprintw(1, 2, "Target: %3d°C   ", target_temperature); // pad
+    mvprintw(1, 20, "Update: %5.0fms   ", live_stats_interval * 1000); // pad
+    mvprintw(1, 35, "PID: %-8s   ", pid_enabled ? "Enabled" : "Disabled"); // pad
     if (debug_mode) {
-        mvprintw(1, 50, "DEBUG: ON");
+        mvprintw(1, 50, "DEBUG: ON   ");
     }
     attroff(COLOR_PAIR(4));
     
@@ -1667,8 +1688,7 @@ static void live_stats_display(void) {
     
     // Temperature section - only update if changed
     if (cpu_temp != last_display_cpu_temp || gpu_temp != last_display_gpu_temp) {
-        mvprintw(3, 2, "Temperature:");
-        
+        mvprintw(3, 2, "Temperature:         ");
         // CPU temperature with color coding
         if (cpu_temp > target_temperature + 10) {
             attron(COLOR_PAIR(3));
@@ -1677,9 +1697,8 @@ static void live_stats_display(void) {
         } else {
             attron(COLOR_PAIR(1));
         }
-        mvprintw(4, 4, "CPU: %d°C", cpu_temp);
+        mvprintw(4, 4, "CPU: %3d°C   ", cpu_temp);
         attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
-        
         // GPU temperature with color coding
         if (gpu_temp > target_temperature + 10) {
             attron(COLOR_PAIR(3));
@@ -1688,12 +1707,10 @@ static void live_stats_display(void) {
         } else {
             attron(COLOR_PAIR(1));
         }
-        mvprintw(4, 20, "GPU: %d°C", gpu_temp);
+        mvprintw(4, 20, "GPU: %3d°C   ", gpu_temp);
         attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
-        
         // Max temperature
-        mvprintw(4, 36, "Max: %d°C", max_temp);
-        
+        mvprintw(4, 36, "Max: %3d°C   ", max_temp);
         last_display_cpu_temp = cpu_temp;
         last_display_gpu_temp = gpu_temp;
     }
@@ -1705,8 +1722,7 @@ static void live_stats_display(void) {
     
     // Fan control section - only update if changed
     if (fan_duty != last_display_fan_duty || fan_rpm != last_display_fan_rpm) {
-        mvprintw(6, 2, "Fan Control:");
-        
+        mvprintw(6, 2, "Fan Control:         ");
         // Fan duty with color coding
         if (fan_duty >= 80) {
             attron(COLOR_PAIR(2));
@@ -1715,34 +1731,26 @@ static void live_stats_display(void) {
         } else {
             attron(COLOR_PAIR(1));
         }
-        mvprintw(7, 4, "Duty: %d%%", fan_duty);
+        mvprintw(7, 4, "Duty: %3d%%   ", fan_duty);
         attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(4));
-        
         // Fan RPM with color coding
         if (fan_rpm < 1000 && fan_duty > 20) {
-            attron(COLOR_PAIR(3));  // Low RPM at high duty = problem
+            attron(COLOR_PAIR(3));
         } else if (fan_rpm < 2000) {
             attron(COLOR_PAIR(2));
         } else {
             attron(COLOR_PAIR(1));
         }
-        mvprintw(7, 20, "RPM: %d", fan_rpm);
+        mvprintw(7, 20, "RPM: %5d   ", fan_rpm);
         attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
-        
         // Fan health status
         const char* health_status = "OK";
         if (fan_rpm < 1000 && fan_duty > 20) {
             health_status = "LOW";
-            attron(COLOR_PAIR(3));
         } else if (fan_rpm < 2000 && fan_duty > 50) {
             health_status = "WARN";
-            attron(COLOR_PAIR(2));
-        } else {
-            attron(COLOR_PAIR(1));
         }
-        mvprintw(7, 36, "Health: %s", health_status);
-        attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
-        
+        mvprintw(7, 36, "Health: %-5s   ", health_status); // pad to 5 chars
         last_display_fan_duty = fan_duty;
         last_display_fan_rpm = fan_rpm;
     }
@@ -1757,8 +1765,7 @@ static void live_stats_display(void) {
                        fabs(pid_p - last_display_pid_p) > 0.1 ||
                        fabs(pid_i - last_display_pid_i) > 0.1 ||
                        fabs(pid_d - last_display_pid_d) > 0.1)) {
-        mvprintw(9, 2, "PID Status:");
-        
+        mvprintw(9, 2, "PID Status:         ");
         // Error with color coding
         if (fabs(pid_error) > 10) {
             attron(COLOR_PAIR(3));
@@ -1767,20 +1774,18 @@ static void live_stats_display(void) {
         } else {
             attron(COLOR_PAIR(1));
         }
-        mvprintw(10, 4, "Error: %+.1f°C", pid_error);
+        mvprintw(10, 4, "Error: %+6.1f°C   ", pid_error);
         attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
-        
         // PID terms
-        mvprintw(10, 20, "P: %.1f", pid_p);
-        mvprintw(10, 30, "I: %.1f", pid_i);
-        mvprintw(10, 40, "D: %.1f", pid_d);
-        
+        mvprintw(10, 20, "P: %7.1f   ", pid_p);
+        mvprintw(10, 30, "I: %7.1f   ", pid_i);
+        mvprintw(10, 40, "D: %7.1f   ", pid_d);
         last_display_pid_error = pid_error;
         last_display_pid_p = pid_p;
         last_display_pid_i = pid_i;
         last_display_pid_d = pid_d;
     } else if (!pid_enabled) {
-        mvprintw(9, 2, "PID Status: Disabled");
+        mvprintw(9, 2, "PID Status: Disabled         ");
     }
     
     // Draw separator
@@ -1789,20 +1794,20 @@ static void live_stats_display(void) {
     mvprintw(11, max_x - 1, "+");
     
     // Status section
-    mvprintw(12, 2, "Status: %s", share_info->auto_duty ? "Auto Mode" : "Manual Mode");
+    mvprintw(12, 2, "Status: %-10s   ", share_info->auto_duty ? "Auto Mode" : "Manual Mode");
     
     // Stuck detection status
     const char* stuck_status = is_temp_stuck() ? "Yes" : "No";
     if (is_temp_stuck()) {
         attron(COLOR_PAIR(2));
     }
-    mvprintw(12, 25, "Stuck: %s", stuck_status);
+    mvprintw(12, 25, "Stuck: %-3s   ", stuck_status); // pad to 3 chars
     if (is_temp_stuck()) {
         attroff(COLOR_PAIR(2));
     }
     
     // Recovery attempts
-    mvprintw(12, 40, "Recovery: %d/%d", fan_recovery_attempts, max_fan_recovery_attempts);
+    mvprintw(12, 40, "Recovery: %d/%d   ", fan_recovery_attempts, max_fan_recovery_attempts);
     
     // Draw footer
     mvprintw(13, 0, "+");
