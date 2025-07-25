@@ -185,12 +185,22 @@ static void* socket_server_thread(void* arg) {
                 continue;
             }
             
-            // Handle client in a simple way (for now, single-threaded)
+            // Handle client with persistent connection
             char buffer[BUFFER_SIZE];
-            ssize_t received = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
-            if (received > 0) {
-                buffer[received] = '\0';
-                handle_client_command(client_sock, buffer);
+            while (socket_running) {
+                ssize_t received = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
+                if (received > 0) {
+                    buffer[received] = '\0';
+                    handle_client_command(client_sock, buffer);
+                } else if (received == 0) {
+                    // Client closed connection
+                    socket_log(LOG_INFO, "Client disconnected");
+                    break;
+                } else {
+                    // Error receiving data
+                    socket_log(LOG_ERR, "Error receiving from client: %s", strerror(errno));
+                    break;
+                }
             }
             
             close(client_sock);

@@ -84,7 +84,7 @@ static int last_display_fan_rpm = -1;
 
 // Live stats function declarations
 static void live_stats_init(void);
-static void live_stats_display(int sock);
+static int live_stats_display(int sock);
 static void live_stats_cleanup(void);
 static void live_stats_handle_resize(void);
 static void live_stats_handle_input(void);
@@ -358,7 +358,21 @@ int main(int argc, char* argv[]) {
         case CMD_LIVE_STATS:
             live_stats_init();
             while (running) {
-                live_stats_display(sock);
+                int display_status = live_stats_display(sock);
+                
+                // Check if we need to reconnect
+                if (display_status == -2) { // -2 indicates broken pipe
+                    // Connection lost, try to reconnect
+                    close(sock);
+                    sock = connect_to_daemon();
+                    if (sock < 0) {
+                        // Failed to reconnect, show error and exit
+                        live_stats_cleanup();
+                        printf("Failed to reconnect to daemon. Exiting...\n");
+                        return EXIT_FAILURE;
+                    }
+                }
+                
                 usleep((int)(config.monitor_interval * 1000000));
             }
             live_stats_cleanup();
@@ -396,8 +410,12 @@ static int connect_to_daemon(void) {
 }
 
 static int send_command(int sock, const char* command) {
-    ssize_t sent = send(sock, command, strlen(command), 0);
+    ssize_t sent = send(sock, command, strlen(command), MSG_NOSIGNAL);
     if (sent < 0) {
+        if (errno == EPIPE) {
+            // Connection was closed by daemon
+            return -2; // Special error code for broken pipe
+        }
         perror("send");
         return -1;
     }
@@ -465,7 +483,8 @@ static void monitor_loop(int sock) {
         char command[64];
         snprintf(command, sizeof(command), "STATUS");
         
-        if (send_command(sock, command) == 0) {
+        int send_result = send_command(sock, command);
+        if (send_result == 0) {
             char response[BUFFER_SIZE];
             if (receive_response(sock, response, sizeof(response)) == 0) {
                 // Clear screen and print status
@@ -479,9 +498,19 @@ static void monitor_loop(int sock) {
                     printf("Last updated: %s\n", time_str);
                 }
             }
+        } else if (send_result == -2) {
+            // Broken pipe - daemon connection lost
+            printf("\nConnection to daemon lost. Attempting to reconnect...\n");
+            close(sock);
+            sock = connect_to_daemon();
+            if (sock < 0) {
+                printf("Failed to reconnect to daemon. Exiting...\n");
+                break;
+            }
+            printf("Reconnected to daemon.\n");
         }
         
-                        usleep((int)(config.monitor_interval * 1000000));
+        usleep((int)(config.monitor_interval * 1000000));
     }
 }
 
@@ -494,39 +523,54 @@ static void signal_handler(int sig) {
 static void print_help(void) {
     printf("Usage: clevo-client [OPTIONS] COMMAND\n\n");
     printf("Commands:\n");
-    printf("  status              Show current fan control status\n");
-    printf("  monitor [INTERVAL]  Continuously monitor status (default: 2.0s)\n");
-    printf("  live-stats [INTERVAL] Live statistics display (default: 0.1s)\n");
-    printf("  set-fan DUTY        Set fan duty cycle (1-100%%)\n");
-    printf("  set-auto            Enable automatic fan control\n");
-    printf("  set-target-temp TEMP Set target temperature for auto control (40-100°C)\n");
-    printf("  get-temp            Get current temperatures\n");
-    printf("  get-fan             Get current fan status\n");
-    printf("  set-max-duty-change RATE Set max duty change rate (1-100%%, default: 30)\n");
-    printf("  get-max-duty-change Get current max duty change rate\n");
-    printf("  set-max-increase-rate N   Set max fan duty increase per cycle (1-100)\n");
-    printf("  set-max-decrease-rate N   Set max fan duty decrease per cycle (1-100)\n");
-    printf("  get-max-increase-rate     Show current max fan duty increase per cycle\n");
-    printf("  get-max-decrease-rate     Show current max fan duty decrease per cycle\n");
-    printf("  temp-monitor [INTERVAL] Monitor temperatures continuously (default: 2.0s)\n");
-    printf("  help                Show this help message\n\n");
+    printf("  --status              Show current fan control status\n");
+    printf("  --monitor [INTERVAL]  Continuously monitor status (default: 2.0s)\n");
+    printf("  --live-stats [INTERVAL] Live statistics display (default: 0.1s)\n");
+    printf("  --set-fan DUTY        Set fan duty cycle (1-100%%)\n");
+    printf("  --set-auto            Enable automatic fan control\n");
+    printf("  --set-target-temp TEMP Set target temperature for auto control (40-100°C)\n");
+    printf("  --get-temp            Get current temperatures\n");
+    printf("  --get-fan             Get current fan status\n");
+    printf("  --set-max-duty-change RATE Set max duty change rate (1-100%%, default: 30)\n");
+    printf("  --get-max-duty-change Get current max duty change rate\n");
+    printf("  --set-max-increase-rate N   Set max fan duty increase per cycle (1-100)\n");
+    printf("  --set-max-decrease-rate N   Set max fan duty decrease per cycle (1-100)\n");
+    printf("  --get-max-increase-rate     Show current max fan duty increase per cycle\n");
+    printf("  --get-max-decrease-rate     Show current max fan duty decrease per cycle\n");
+    printf("  --temp-monitor [INTERVAL] Monitor temperatures continuously (default: 2.0s)\n");
+    printf("  --help                Show this help message\n\n");
     printf("Options:\n");
-    printf("  -v, --verbose       Enable verbose output\n");
-    printf("  -j, --json          Output in JSON format\n");
-    printf("  -h, --help          Show this help message\n\n");
+    printf("  -v, --verbose         Enable verbose output\n");
+    printf("  -j, --json            Output in JSON format\n");
+    printf("  -h, --help            Show this help message\n\n");
     printf("Examples:\n");
-    printf("  clevo-client status\n");
-    printf("  clevo-client monitor 5\n");
-    printf("  clevo-client live-stats 0.1\n");
-    printf("  clevo-client set-fan 80\n");
-    printf("  clevo-client set-max-duty-change 10\n");
-    printf("  clevo-client get-max-duty-change\n");
-    printf("  clevo-client --json status\n");
+    printf("  clevo-client --status\n");
+    printf("  clevo-client --monitor 5\n");
+    printf("  clevo-client --live-stats 0.1\n");
+    printf("  clevo-client --set-fan 80\n");
+    printf("  clevo-client --set-max-duty-change 10\n");
+    printf("  clevo-client --get-max-duty-change\n");
+    printf("  clevo-client --json --status\n");
 }
 
 static void parse_arguments(int argc, char* argv[]) {
     int opt;
     static struct option long_options[] = {
+        {"status", no_argument, 0, 0x100},
+        {"monitor", optional_argument, 0, 0x101},
+        {"live-stats", optional_argument, 0, 0x102},
+        {"set-fan", required_argument, 0, 0x103},
+        {"set-auto", no_argument, 0, 0x104},
+        {"set-target-temp", required_argument, 0, 0x105},
+        {"get-temp", no_argument, 0, 0x106},
+        {"get-fan", no_argument, 0, 0x107},
+        {"temp-monitor", optional_argument, 0, 0x108},
+        {"set-max-duty-change", required_argument, 0, 0x109},
+        {"get-max-duty-change", no_argument, 0, 0x10A},
+        {"set-max-increase-rate", required_argument, 0, 0x10B},
+        {"get-max-increase-rate", no_argument, 0, 0x10C},
+        {"set-max-decrease-rate", required_argument, 0, 0x10D},
+        {"get-max-decrease-rate", no_argument, 0, 0x10E},
         {"verbose", no_argument, 0, 'v'},
         {"json", no_argument, 0, 'j'},
         {"help", no_argument, 0, 'h'},
@@ -535,6 +579,92 @@ static void parse_arguments(int argc, char* argv[]) {
     
     while ((opt = getopt_long(argc, argv, "vjh", long_options, NULL)) != -1) {
         switch (opt) {
+            case 0x100: // --status
+                config.type = CMD_STATUS;
+                break;
+            case 0x101: // --monitor
+                config.type = CMD_MONITOR;
+                config.monitor_interval = 2.0; // Default 2 seconds
+                if (optarg) {
+                    config.monitor_interval = atof(optarg);
+                    if (config.monitor_interval < 0.1) config.monitor_interval = 0.1;
+                }
+                break;
+            case 0x102: // --live-stats
+                config.type = CMD_LIVE_STATS;
+                config.live_stats_mode = 1;
+                config.monitor_interval = 0.1; // Default 100ms for live stats
+                if (optarg) {
+                    config.monitor_interval = atof(optarg);
+                    if (config.monitor_interval < 0.05) config.monitor_interval = 0.05;
+                }
+                break;
+            case 0x103: // --set-fan
+                config.type = CMD_SET_FAN;
+                config.fan_duty = atoi(optarg);
+                if (config.fan_duty < 1 || config.fan_duty > 100) {
+                    fprintf(stderr, "Error: Fan duty must be between 1 and 100\n");
+                    exit(EXIT_FAILURE);
+                }
+                break;
+            case 0x104: // --set-auto
+                config.type = CMD_SET_AUTO;
+                break;
+            case 0x105: // --set-target-temp
+                config.type = CMD_SET_TARGET_TEMP;
+                config.target_temperature = atoi(optarg);
+                if (config.target_temperature < 40 || config.target_temperature > 100) {
+                    fprintf(stderr, "Error: Target temperature must be between 40 and 100°C\n");
+                    exit(EXIT_FAILURE);
+                }
+                break;
+            case 0x106: // --get-temp
+                config.type = CMD_GET_TEMP;
+                break;
+            case 0x107: // --get-fan
+                config.type = CMD_GET_FAN;
+                break;
+            case 0x108: // --temp-monitor
+                config.type = CMD_TEMP_MONITOR;
+                config.monitor_interval = 2.0; // Default 2 seconds
+                if (optarg) {
+                    config.monitor_interval = atof(optarg);
+                    if (config.monitor_interval < 0.1) config.monitor_interval = 0.1;
+                }
+                break;
+            case 0x109: // --set-max-duty-change
+                config.type = CMD_SET_MAX_DUTY_CHANGE;
+                config.max_duty_change_rate = atoi(optarg);
+                if (config.max_duty_change_rate < 1 || config.max_duty_change_rate > 100) {
+                    fprintf(stderr, "Error: Max duty change rate must be between 1 and 100\n");
+                    exit(EXIT_FAILURE);
+                }
+                break;
+            case 0x10A: // --get-max-duty-change
+                config.type = CMD_GET_MAX_DUTY_CHANGE;
+                break;
+            case 0x10B: // --set-max-increase-rate
+                config.type = CMD_SET_MAX_DUTY_INCREASE;
+                config.max_duty_increase_rate = atoi(optarg);
+                if (config.max_duty_increase_rate < 1 || config.max_duty_increase_rate > 100) {
+                    fprintf(stderr, "Error: Max duty increase rate must be between 1 and 100\n");
+                    exit(EXIT_FAILURE);
+                }
+                break;
+            case 0x10C: // --get-max-increase-rate
+                config.type = CMD_GET_MAX_DUTY_INCREASE;
+                break;
+            case 0x10D: // --set-max-decrease-rate
+                config.type = CMD_SET_MAX_DUTY_DECREASE;
+                config.max_duty_decrease_rate = atoi(optarg);
+                if (config.max_duty_decrease_rate < 1 || config.max_duty_decrease_rate > 100) {
+                    fprintf(stderr, "Error: Max duty decrease rate must be between 1 and 100\n");
+                    exit(EXIT_FAILURE);
+                }
+                break;
+            case 0x10E: // --get-max-decrease-rate
+                config.type = CMD_GET_MAX_DUTY_DECREASE;
+                break;
             case 'v':
                 config.verbose = 1;
                 break;
@@ -550,116 +680,9 @@ static void parse_arguments(int argc, char* argv[]) {
         }
     }
     
-    // Parse command
-    if (optind >= argc) {
-        config.type = CMD_STATUS; // Default to status
-        return;
-    }
-    
-    const char* command = argv[optind];
-    
-    if (strcmp(command, "status") == 0) {
+    // If no command specified, default to status
+    if (config.type == 0) {
         config.type = CMD_STATUS;
-    } else if (strcmp(command, "monitor") == 0) {
-        config.type = CMD_MONITOR;
-        config.monitor_interval = 2.0; // Default 2 seconds
-        if (optind + 1 < argc) {
-            config.monitor_interval = atof(argv[optind + 1]);
-            if (config.monitor_interval < 0.1) config.monitor_interval = 0.1;
-        }
-    } else if (strcmp(command, "live-stats") == 0) {
-        config.type = CMD_LIVE_STATS;
-        config.live_stats_mode = 1;
-        config.monitor_interval = 0.1; // Default 100ms for live stats
-        if (optind + 1 < argc) {
-            config.monitor_interval = atof(argv[optind + 1]);
-            if (config.monitor_interval < 0.05) config.monitor_interval = 0.05;
-        }
-    } else if (strcmp(command, "set-fan") == 0) {
-        config.type = CMD_SET_FAN;
-        if (optind + 1 < argc) {
-            config.fan_duty = atoi(argv[optind + 1]);
-            if (config.fan_duty < 1 || config.fan_duty > 100) {
-                fprintf(stderr, "Error: Fan duty must be between 1 and 100\n");
-                exit(EXIT_FAILURE);
-            }
-        } else {
-            fprintf(stderr, "Error: Fan duty value required\n");
-            exit(EXIT_FAILURE);
-        }
-    } else if (strcmp(command, "set-auto") == 0) {
-        config.type = CMD_SET_AUTO;
-    } else if (strcmp(command, "set-target-temp") == 0) {
-        config.type = CMD_SET_TARGET_TEMP;
-        if (optind + 1 < argc) {
-            config.target_temperature = atoi(argv[optind + 1]);
-            if (config.target_temperature < 40 || config.target_temperature > 100) {
-                fprintf(stderr, "Error: Target temperature must be between 40 and 100°C\n");
-                exit(EXIT_FAILURE);
-            }
-        } else {
-            fprintf(stderr, "Error: Target temperature value required\n");
-            exit(EXIT_FAILURE);
-        }
-    } else if (strcmp(command, "get-temp") == 0) {
-        config.type = CMD_GET_TEMP;
-    } else if (strcmp(command, "get-fan") == 0) {
-        config.type = CMD_GET_FAN;
-    } else if (strcmp(command, "set-max-duty-change") == 0) {
-        config.type = CMD_SET_MAX_DUTY_CHANGE;
-        if (optind + 1 < argc) {
-            config.max_duty_change_rate = atoi(argv[optind + 1]);
-            if (config.max_duty_change_rate < 1 || config.max_duty_change_rate > 100) {
-                fprintf(stderr, "Error: Max duty change rate must be between 1 and 100\n");
-                exit(EXIT_FAILURE);
-            }
-        } else {
-            fprintf(stderr, "Error: Max duty change rate value required\n");
-            exit(EXIT_FAILURE);
-        }
-    } else if (strcmp(command, "get-max-duty-change") == 0) {
-        config.type = CMD_GET_MAX_DUTY_CHANGE;
-    } else if (strcmp(command, "set-max-increase-rate") == 0) {
-        config.type = CMD_SET_MAX_DUTY_INCREASE;
-        if (optind + 1 < argc) {
-            config.max_duty_increase_rate = atoi(argv[optind + 1]);
-            if (config.max_duty_increase_rate < 1 || config.max_duty_increase_rate > 100) {
-                fprintf(stderr, "Error: Max duty increase rate must be between 1 and 100\n");
-                exit(EXIT_FAILURE);
-            }
-        } else {
-            fprintf(stderr, "Error: Max duty increase rate value required\n");
-            exit(EXIT_FAILURE);
-        }
-    } else if (strcmp(command, "set-max-decrease-rate") == 0) {
-        config.type = CMD_SET_MAX_DUTY_DECREASE;
-        if (optind + 1 < argc) {
-            config.max_duty_decrease_rate = atoi(argv[optind + 1]);
-            if (config.max_duty_decrease_rate < 1 || config.max_duty_decrease_rate > 100) {
-                fprintf(stderr, "Error: Max duty decrease rate must be between 1 and 100\n");
-                exit(EXIT_FAILURE);
-            }
-        } else {
-            fprintf(stderr, "Error: Max duty decrease rate value required\n");
-            exit(EXIT_FAILURE);
-        }
-    } else if (strcmp(command, "get-max-increase-rate") == 0) {
-        config.type = CMD_GET_MAX_DUTY_INCREASE;
-    } else if (strcmp(command, "get-max-decrease-rate") == 0) {
-        config.type = CMD_GET_MAX_DUTY_DECREASE;
-    } else if (strcmp(command, "temp-monitor") == 0) {
-        config.type = CMD_TEMP_MONITOR;
-        config.monitor_interval = 2.0; // Default 2 seconds
-        if (optind + 1 < argc) {
-            config.monitor_interval = atof(argv[optind + 1]);
-            if (config.monitor_interval < 0.1) config.monitor_interval = 0.1;
-        }
-    } else if (strcmp(command, "help") == 0) {
-        config.type = CMD_HELP;
-    } else {
-        fprintf(stderr, "Error: Unknown command '%s'\n", command);
-        print_help();
-        exit(EXIT_FAILURE);
     }
 }
 
@@ -690,8 +713,8 @@ static void live_stats_init(void) {
     initscr();
     cbreak();
     noecho();
-    curs_set(0);  // Hide cursor
-    keypad(stdscr, TRUE);
+    // curs_set(0);  // Hide cursor - removed due to terminal compatibility issues
+    // keypad(stdscr, TRUE);  // Removed due to terminal compatibility issues
     nodelay(stdscr, TRUE);  // Non-blocking input
     
     // Enable colors if available
@@ -710,7 +733,7 @@ static void live_stats_init(void) {
     
     // Clear screen and draw initial layout
     clear();
-    refresh();
+    // refresh();  // Removed due to terminal compatibility issues
     
     // Handle window resize
     live_stats_handle_resize();
@@ -723,10 +746,10 @@ static void live_stats_handle_resize(void) {
     getmaxyx(stdscr, max_y, max_x);
     
     // Minimum window size check
-    if (max_y < 12 || max_x < 60) {
+    if (max_y < 8 || max_x < 40) {
         clear();
-        mvprintw(max_y/2, (max_x-40)/2, "Window too small! Need 60x12 minimum");
-        refresh();
+        mvprintw(max_y/2, (max_x-40)/2, "Window too small! Need 40x8 minimum");
+        // refresh();  // Removed due to terminal compatibility issues
         return;
     }
     
@@ -734,153 +757,182 @@ static void live_stats_handle_resize(void) {
     clear();
 }
 
-static void live_stats_display(int sock) {
-    if (!live_stats_initialized) return;
+static int live_stats_display(int sock) {
+    if (!live_stats_initialized) {
+        return -1; // Indicate initialization failure
+    }
     
     int max_y, max_x;
     getmaxyx(stdscr, max_y, max_x);
     
     // Check window size
-    if (max_y < 12 || max_x < 60) {
+    // Temporarily disabled window size check
+    /*
+    if (max_y < 8 || max_x < 40) {
+        printf("DEBUG: Window too small\n");
         live_stats_handle_resize();
-        return;
+        return -1; // Indicate window too small
     }
+    */
     
     // Get current status from daemon
     char command[64];
     snprintf(command, sizeof(command), "STATUS");
     char response[BUFFER_SIZE];
     
-    if (send_command(sock, command) == 0 && receive_response(sock, response, sizeof(response)) == 0) {
+    // Try to get status from daemon
+    int comm_success = 0;
+    int cpu_temp = 0, gpu_temp = 0, fan_duty = 0, fan_rpm = 0, auto_mode = 0;
+    
+    int send_result = send_command(sock, command);
+    if (send_result == 0 && receive_response(sock, response, sizeof(response)) == 0) {
         // Parse response
-        int cpu_temp, gpu_temp, fan_duty, fan_rpm, auto_mode;
         if (sscanf(response, "CPU:%d GPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d", 
                     &cpu_temp, &gpu_temp, &fan_duty, &fan_rpm, &auto_mode) == 5) {
-            
-            int max_temp = (cpu_temp > gpu_temp) ? cpu_temp : gpu_temp;
-            
-            // Draw header
-            attron(COLOR_PAIR(5) | A_BOLD);
-            mvprintw(0, 0, "+--- Clevo Fan Control Client Live Stats ");
-            for (int i = 37; i < max_x - 2; i++) mvprintw(0, i, "-");
-            mvprintw(0, max_x - 2, "+");
-            attroff(COLOR_PAIR(5) | A_BOLD);
-            
-            // Draw header info
-            attron(COLOR_PAIR(4));
-            mvprintw(1, 2, "Update: %5.0fms            ", config.monitor_interval * 1000);
-            mvprintw(1, 30, "Mode: %-8s            ", auto_mode ? "Auto" : "Manual");
-            attroff(COLOR_PAIR(4));
-            
-            // Draw separator
-            mvprintw(2, 0, "+");
-            for (int i = 1; i < max_x - 1; i++) mvprintw(2, i, "-");
-            mvprintw(2, max_x - 1, "+");
-            
-            // Temperature section - only update if changed
-            if (cpu_temp != last_display_cpu_temp || gpu_temp != last_display_gpu_temp) {
-                mvprintw(3, 2, "Temperature:                                ");
-                // CPU temperature with color coding
-                if (cpu_temp >= 80) {
-                    attron(COLOR_PAIR(3));
-                } else if (cpu_temp >= 70) {
-                    attron(COLOR_PAIR(2));
-                } else {
-                    attron(COLOR_PAIR(1));
-                }
-                mvprintw(4, 4, "CPU: %3d°C            ", cpu_temp);
-                attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
-                // GPU temperature with color coding
-                if (gpu_temp >= 80) {
-                    attron(COLOR_PAIR(3));
-                } else if (gpu_temp >= 70) {
-                    attron(COLOR_PAIR(2));
-                } else {
-                    attron(COLOR_PAIR(1));
-                }
-                mvprintw(4, 30, "GPU: %3d°C            ", gpu_temp);
-                attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
-                // Max temperature
-                mvprintw(4, 56, "Max: %3d°C            ", max_temp);
-                last_display_cpu_temp = cpu_temp;
-                last_display_gpu_temp = gpu_temp;
-            }
-            
-            // Draw separator
-            mvprintw(5, 0, "+");
-            for (int i = 1; i < max_x - 1; i++) mvprintw(5, i, "-");
-            mvprintw(5, max_x - 1, "+");
-            
-            // Fan control section - only update if changed
-            if (fan_duty != last_display_fan_duty || fan_rpm != last_display_fan_rpm) {
-                mvprintw(6, 2, "Fan Control:                                ");
-                // Fan duty with color coding
-                if (fan_duty >= 80) {
-                    attron(COLOR_PAIR(2));
-                } else if (fan_duty >= 50) {
-                    attron(COLOR_PAIR(4));
-                } else {
-                    attron(COLOR_PAIR(1));
-                }
-                mvprintw(7, 4, "Duty: %3d%%            ", fan_duty);
-                attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(4));
-                // Fan RPM with color coding
-                if (fan_rpm < 1000 && fan_duty > 20) {
-                    attron(COLOR_PAIR(3));
-                } else if (fan_rpm < 2000) {
-                    attron(COLOR_PAIR(2));
-                } else {
-                    attron(COLOR_PAIR(1));
-                }
-                mvprintw(7, 30, "RPM: %5d            ", fan_rpm);
-                attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
-                // Fan health status
-                const char* health_status = "OK";
-                if (fan_rpm < 1000 && fan_duty > 20) {
-                    health_status = "LOW";
-                } else if (fan_rpm < 2000 && fan_duty > 50) {
-                    health_status = "WARN";
-                }
-                mvprintw(7, 56, "Health: %-5s            ", health_status);
-                last_display_fan_duty = fan_duty;
-                last_display_fan_rpm = fan_rpm;
-            }
-            
-            // Draw separator
-            mvprintw(8, 0, "+");
-            for (int i = 1; i < max_x - 1; i++) mvprintw(8, i, "-");
-            mvprintw(8, max_x - 1, "+");
-            
-            // Status section
-            mvprintw(9, 2, "Status: %-10s            ", auto_mode ? "Auto Mode" : "Manual Mode");
-            
-            // Temperature status
-            const char* temp_status = "NORMAL";
-            if (max_temp >= 80) {
-                temp_status = "CRITICAL";
+            comm_success = 1;
+        }
+    } else if (send_result == -2) {
+        // Broken pipe - daemon connection lost
+        return -2; // Indicate broken pipe
+    }
+    
+    if (comm_success) {
+        int max_temp = (cpu_temp > gpu_temp) ? cpu_temp : gpu_temp;
+        
+        // Draw header
+        attron(COLOR_PAIR(5) | A_BOLD);
+        mvprintw(0, 0, "+--- Clevo Fan Control Client Live Stats ");
+        for (int i = 37; i < max_x - 2; i++) mvprintw(0, i, "-");
+        mvprintw(0, max_x - 2, "+");
+        attroff(COLOR_PAIR(5) | A_BOLD);
+        
+        // Draw header info
+        attron(COLOR_PAIR(4));
+        mvprintw(1, 2, "Update: %5.0fms            ", config.monitor_interval * 1000);
+        mvprintw(1, 30, "Mode: %-8s            ", auto_mode ? "Auto" : "Manual");
+        attroff(COLOR_PAIR(4));
+        
+        // Draw separator
+        mvprintw(2, 0, "+");
+        for (int i = 1; i < max_x - 1; i++) mvprintw(2, i, "-");
+        mvprintw(2, max_x - 1, "+");
+        
+        // Temperature section - only update if changed
+        if (cpu_temp != last_display_cpu_temp || gpu_temp != last_display_gpu_temp) {
+            mvprintw(3, 2, "Temperature:                                ");
+            // CPU temperature with color coding
+            if (cpu_temp >= 80) {
                 attron(COLOR_PAIR(3));
-            } else if (max_temp >= 70) {
-                temp_status = "HIGH";
+            } else if (cpu_temp >= 70) {
                 attron(COLOR_PAIR(2));
-            } else if (max_temp >= 60) {
-                temp_status = "WARM";
+            } else {
+                attron(COLOR_PAIR(1));
+            }
+            mvprintw(4, 4, "CPU: %3d°C            ", cpu_temp);
+            attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
+            // GPU temperature with color coding
+            if (gpu_temp >= 80) {
+                attron(COLOR_PAIR(3));
+            } else if (gpu_temp >= 70) {
+                attron(COLOR_PAIR(2));
+            } else {
+                attron(COLOR_PAIR(1));
+            }
+            mvprintw(4, 30, "GPU: %3d°C            ", gpu_temp);
+            attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
+            // Max temperature
+            mvprintw(4, 56, "Max: %3d°C            ", max_temp);
+            last_display_cpu_temp = cpu_temp;
+            last_display_gpu_temp = gpu_temp;
+        }
+        
+        // Draw separator
+        mvprintw(5, 0, "+");
+        for (int i = 1; i < max_x - 1; i++) mvprintw(5, i, "-");
+        mvprintw(5, max_x - 1, "+");
+        
+        // Fan control section - only update if changed
+        if (fan_duty != last_display_fan_duty || fan_rpm != last_display_fan_rpm) {
+            mvprintw(6, 2, "Fan Control:                                ");
+            // Fan duty with color coding
+            if (fan_duty >= 80) {
+                attron(COLOR_PAIR(2));
+            } else if (fan_duty >= 50) {
                 attron(COLOR_PAIR(4));
             } else {
                 attron(COLOR_PAIR(1));
             }
-            mvprintw(9, 30, "Temp: %-8s            ", temp_status);
-            attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3) | COLOR_PAIR(4));
-            
-            // Draw footer
-            mvprintw(10, 0, "+");
-            for (int i = 1; i < max_x - 1; i++) mvprintw(10, i, "-");
-            mvprintw(10, max_x - 1, "+");
-            
-            // Instructions
-            attron(COLOR_PAIR(4));
-            mvprintw(11, 2, "Press 'q' to quit, 'r' to refresh display");
-            attroff(COLOR_PAIR(4));
+            mvprintw(7, 4, "Duty: %3d%%            ", fan_duty);
+            attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(4));
+            // Fan RPM with color coding
+            if (fan_rpm < 1000 && fan_duty > 20) {
+                attron(COLOR_PAIR(3));
+            } else if (fan_rpm < 2000) {
+                attron(COLOR_PAIR(2));
+            } else {
+                attron(COLOR_PAIR(1));
+            }
+            mvprintw(7, 30, "RPM: %5d            ", fan_rpm);
+            attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
+            // Fan health status
+            const char* health_status = "OK";
+            if (fan_rpm < 1000 && fan_duty > 20) {
+                health_status = "LOW";
+            } else if (fan_rpm < 2000 && fan_duty > 50) {
+                health_status = "WARN";
+            }
+            mvprintw(7, 56, "Health: %-5s            ", health_status);
+            last_display_fan_duty = fan_duty;
+            last_display_fan_rpm = fan_rpm;
         }
+        
+        // Draw separator
+        mvprintw(8, 0, "+");
+        for (int i = 1; i < max_x - 1; i++) mvprintw(8, i, "-");
+        mvprintw(8, max_x - 1, "+");
+        
+        // Status section
+        mvprintw(9, 2, "Status: %-10s            ", auto_mode ? "Auto Mode" : "Manual Mode");
+        
+        // Temperature status
+        const char* temp_status = "NORMAL";
+        if (max_temp >= 80) {
+            temp_status = "CRITICAL";
+            attron(COLOR_PAIR(3));
+        } else if (max_temp >= 70) {
+            temp_status = "HIGH";
+            attron(COLOR_PAIR(2));
+        } else if (max_temp >= 60) {
+            temp_status = "WARM";
+            attron(COLOR_PAIR(4));
+        } else {
+            attron(COLOR_PAIR(1));
+        }
+        mvprintw(9, 30, "Temp: %-8s            ", temp_status);
+        attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3) | COLOR_PAIR(4));
+        
+        // Draw footer
+        mvprintw(10, 0, "+");
+        for (int i = 1; i < max_x - 1; i++) mvprintw(10, i, "-");
+        mvprintw(10, max_x - 1, "+");
+        
+        // Instructions
+        attron(COLOR_PAIR(4));
+        mvprintw(11, 2, "Press 'q' to quit, 'r' to refresh display");
+        attroff(COLOR_PAIR(4));
+        return 0; // Indicate success
+    } else {
+        // Communication failed - show error message
+        clear();
+        attron(COLOR_PAIR(3) | A_BOLD);
+        mvprintw(max_y/2 - 2, (max_x - 40)/2, "Connection Error");
+        attroff(COLOR_PAIR(3) | A_BOLD);
+        attron(COLOR_PAIR(4));
+        mvprintw(max_y/2, (max_x - 50)/2, "Failed to communicate with daemon");
+        mvprintw(max_y/2 + 1, (max_x - 40)/2, "Check if clevo-daemon is running");
+        mvprintw(max_y/2 + 3, (max_x - 30)/2, "Press 'q' to quit");
+        attroff(COLOR_PAIR(4));
+        return -1; // Indicate communication failure
     }
     
     // Handle input
@@ -888,12 +940,13 @@ static void live_stats_display(int sock) {
     
     // Refresh display
     refresh();
+    return 0; // Indicate success
 }
 
 static void live_stats_cleanup(void) {
     if (live_stats_initialized) {
         // Restore terminal
-        curs_set(1);  // Show cursor
+        // curs_set(1);  // Show cursor - removed due to terminal compatibility issues
         endwin();
         live_stats_initialized = 0;
         live_stats_window = NULL;
