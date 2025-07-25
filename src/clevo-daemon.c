@@ -1673,11 +1673,11 @@ static void live_stats_display(void) {
     
     // Draw header info
     attron(COLOR_PAIR(4));
-    mvprintw(1, 2, "Target: %3d°C        ", target_temperature); // more padding
-    mvprintw(1, 25, "Update: %5.0fms        ", live_stats_interval * 1000); // more padding
-    mvprintw(1, 50, "PID: %-8s        ", pid_enabled ? "Enabled" : "Disabled"); // more padding
+    mvprintw(1, 2, "Target: %3d°C            ", target_temperature); // more padding
+    mvprintw(1, 30, "Update: %5.0fms            ", live_stats_interval * 1000); // more padding
+    mvprintw(1, 60, "PID: %-8s            ", pid_enabled ? "Enabled" : "Disabled"); // more padding
     if (debug_mode) {
-        mvprintw(1, 75, "DEBUG: ON        ");
+        mvprintw(1, 85, "DEBUG: ON            ");
     }
     attroff(COLOR_PAIR(4));
     
@@ -1688,7 +1688,7 @@ static void live_stats_display(void) {
     
     // Temperature section - only update if changed
     if (cpu_temp != last_display_cpu_temp || gpu_temp != last_display_gpu_temp) {
-        mvprintw(3, 2, "Temperature:                    ");
+        mvprintw(3, 2, "Temperature:                                ");
         // CPU temperature with color coding
         if (cpu_temp > target_temperature + 10) {
             attron(COLOR_PAIR(3));
@@ -1697,7 +1697,7 @@ static void live_stats_display(void) {
         } else {
             attron(COLOR_PAIR(1));
         }
-        mvprintw(4, 4, "CPU: %3d°C        ", cpu_temp);
+        mvprintw(4, 4, "CPU: %3d°C            ", cpu_temp);
         attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
         // GPU temperature with color coding
         if (gpu_temp > target_temperature + 10) {
@@ -1707,10 +1707,10 @@ static void live_stats_display(void) {
         } else {
             attron(COLOR_PAIR(1));
         }
-        mvprintw(4, 25, "GPU: %3d°C        ", gpu_temp);
+        mvprintw(4, 30, "GPU: %3d°C            ", gpu_temp);
         attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
         // Max temperature
-        mvprintw(4, 46, "Max: %3d°C        ", max_temp);
+        mvprintw(4, 56, "Max: %3d°C            ", max_temp);
         last_display_cpu_temp = cpu_temp;
         last_display_gpu_temp = gpu_temp;
     }
@@ -1722,7 +1722,7 @@ static void live_stats_display(void) {
     
     // Fan control section - only update if changed
     if (fan_duty != last_display_fan_duty || fan_rpm != last_display_fan_rpm) {
-        mvprintw(6, 2, "Fan Control:                    ");
+        mvprintw(6, 2, "Fan Control:                                ");
         // Fan duty with color coding
         if (fan_duty >= 80) {
             attron(COLOR_PAIR(2));
@@ -1731,7 +1731,7 @@ static void live_stats_display(void) {
         } else {
             attron(COLOR_PAIR(1));
         }
-        mvprintw(7, 4, "Duty: %3d%%        ", fan_duty);
+        mvprintw(7, 4, "Duty: %3d%%            ", fan_duty);
         attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(4));
         // Fan RPM with color coding
         if (fan_rpm < 1000 && fan_duty > 20) {
@@ -1741,7 +1741,7 @@ static void live_stats_display(void) {
         } else {
             attron(COLOR_PAIR(1));
         }
-        mvprintw(7, 25, "RPM: %5d        ", fan_rpm);
+        mvprintw(7, 30, "RPM: %5d            ", fan_rpm);
         attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
         // Fan health status
         const char* health_status = "OK";
@@ -1750,7 +1750,7 @@ static void live_stats_display(void) {
         } else if (fan_rpm < 2000 && fan_duty > 50) {
             health_status = "WARN";
         }
-        mvprintw(7, 46, "Health: %-5s        ", health_status); // pad to 5 chars
+        mvprintw(7, 56, "Health: %-5s            ", health_status); // pad to 5 chars
         last_display_fan_duty = fan_duty;
         last_display_fan_rpm = fan_rpm;
     }
@@ -1765,7 +1765,7 @@ static void live_stats_display(void) {
                        fabs(pid_p - last_display_pid_p) > 0.1 ||
                        fabs(pid_i - last_display_pid_i) > 0.1 ||
                        fabs(pid_d - last_display_pid_d) > 0.1)) {
-        mvprintw(9, 2, "PID Status:                    ");
+        mvprintw(9, 2, "PID Status:                                ");
         // Error with color coding
         if (fabs(pid_error) > 10) {
             attron(COLOR_PAIR(3));
@@ -1774,18 +1774,18 @@ static void live_stats_display(void) {
         } else {
             attron(COLOR_PAIR(1));
         }
-        mvprintw(10, 4, "Error: %+6.1f°C        ", pid_error);
+        mvprintw(10, 4, "Error: %+6.1f°C            ", pid_error);
         attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
         // PID terms
-        mvprintw(10, 20, "P: %7.1f        ", pid_p);
-        mvprintw(10, 35, "I: %7.1f        ", pid_i);
-        mvprintw(10, 50, "D: %7.1f        ", pid_d);
+        mvprintw(10, 25, "P: %7.1f            ", pid_p);
+        mvprintw(10, 45, "I: %7.1f            ", pid_i);
+        mvprintw(10, 65, "D: %7.1f            ", pid_d);
         last_display_pid_error = pid_error;
         last_display_pid_p = pid_p;
         last_display_pid_i = pid_i;
         last_display_pid_d = pid_d;
     } else if (!pid_enabled) {
-        mvprintw(9, 2, "PID Status: Disabled                    ");
+        mvprintw(9, 2, "PID Status: Disabled                                ");
     }
     
     // Draw separator
@@ -1794,20 +1794,20 @@ static void live_stats_display(void) {
     mvprintw(11, max_x - 1, "+");
     
     // Status section
-    mvprintw(12, 2, "Status: %-10s        ", share_info->auto_duty ? "Auto Mode" : "Manual Mode");
+    mvprintw(12, 2, "Status: %-10s            ", share_info->auto_duty ? "Auto Mode" : "Manual Mode");
     
     // Stuck detection status
     const char* stuck_status = is_temp_stuck() ? "Yes" : "No";
     if (is_temp_stuck()) {
         attron(COLOR_PAIR(2));
     }
-    mvprintw(12, 25, "Stuck: %-3s        ", stuck_status); // pad to 3 chars
+    mvprintw(12, 30, "Stuck: %-3s            ", stuck_status); // pad to 3 chars
     if (is_temp_stuck()) {
         attroff(COLOR_PAIR(2));
     }
     
     // Recovery attempts
-    mvprintw(12, 46, "Recovery: %d/%d        ", fan_recovery_attempts, max_fan_recovery_attempts);
+    mvprintw(12, 56, "Recovery: %d/%d            ", fan_recovery_attempts, max_fan_recovery_attempts);
     
     // Draw footer
     mvprintw(13, 0, "+");
