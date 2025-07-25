@@ -205,6 +205,14 @@ static void daemonize(void);
 static void check_fan_health(void);
 static int attempt_fan_recovery(void);
 
+// Alternative temperature reading functions
+static int read_temp_from_sysfs(const char* path);
+static int read_temp_from_hwmon(void);
+static int read_temp_from_thermal_zone(void);
+static int read_temp_from_acpi(void);
+static int get_alternative_cpu_temp(void);
+static bool validate_ec_temp_with_alternative(int ec_temp);
+
 // Adaptive PID Controller functions
 static void adaptive_pid_add_temp_history(int temp);
 static double adaptive_pid_calculate_oscillation(void);
@@ -987,7 +995,6 @@ static void parse_command_line(int argc, char* argv[]) {
         {"adaptive-tuning-interval", required_argument, 0, 'A'},
         {"adaptive-target-performance", required_argument, 0, 'P'},
         {"fan-health-check", required_argument, 0, 'f'},
-        {"fan-stuck-threshold", required_argument, 0, 's'},
         {"max-duty-change", required_argument, 0, 'm'},
         {"temp-validation", required_argument, 0, 'v'},
         {"max-temp-change", required_argument, 0, 'T'},
@@ -1048,9 +1055,8 @@ static void parse_command_line(int argc, char* argv[]) {
                 if (fan_health_check_interval > 300) fan_health_check_interval = 300;
                 break;
             case 's':
-                fan_stuck_threshold = atoi(optarg);
-                if (fan_stuck_threshold < 100) fan_stuck_threshold = 100;
-                if (fan_stuck_threshold > 1000) fan_stuck_threshold = 1000;
+                // Removed fan_stuck_threshold handling since we removed the variable
+                printf("Warning: --fan-stuck-threshold option is deprecated and ignored\n");
                 break;
             case 'm':
                 max_duty_change_rate = atoi(optarg);
@@ -1093,7 +1099,6 @@ static void parse_command_line(int argc, char* argv[]) {
                     "  -A, --adaptive-tuning-interval <sec>\tSet adaptive tuning interval (10-300s, default: 30)\n"
                     "  -P, --adaptive-target-performance <value>\tSet target performance score (0.1-1.0, default: 0.8)\n"
                     "  -f, --fan-health-check <sec>\tSet fan health check interval (10-300s, default: 30)\n"
-                    "  -s, --fan-stuck-threshold <rpm>\tSet RPM threshold for stuck fan detection (100-1000, default: 200)\n"
                     "  -m, --max-duty-change <%%>\tSet the maximum duty change per cycle (1-100, default: 15)\n"
                     "  -v, --temp-validation <0|1>\tEnable/Disable temperature validation (default: 1)\n"
                     "  -T, --max-temp-change <°C>\tSet max temperature change per cycle (1-50°C, default: 10)\n"
@@ -1609,6 +1614,12 @@ static int sanitize_temperature_reading(int current_temp, int last_temp, const c
     static int invalid_reading_count = 0;
     static int last_valid_temp = 0;
     
+    // First validate with alternative temperature sources
+    if (!validate_ec_temp_with_alternative(current_temp)) {
+        invalid_reading_count++;
+        daemon_log(LOG_WARNING, "EC temperature failed validation with alternative sources");
+    }
+    
     if (validate_temperature_reading(current_temp, last_temp, sensor_name)) {
         invalid_reading_count = 0;
         last_valid_temp = current_temp;
@@ -1647,6 +1658,136 @@ static int sanitize_temperature_reading(int current_temp, int last_temp, const c
     }
     
     return last_valid_temp;
+}
+
+// Alternative temperature reading functions
+static int read_temp_from_sysfs(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    
+    int temp = -1;
+    if (fscanf(f, "%d", &temp) == 1) {
+        // Convert from millidegrees to degrees
+        temp /= 1000;
+    }
+    fclose(f);
+    return temp;
+}
+
+static int read_temp_from_hwmon(void) {
+    // Try common hwmon paths
+    const char* hwmon_paths[] = {
+        "/sys/class/hwmon/hwmon0/temp1_input",
+        "/sys/class/hwmon/hwmon1/temp1_input", 
+        "/sys/class/hwmon/hwmon2/temp1_input",
+        "/sys/class/hwmon/hwmon0/temp2_input",
+        "/sys/class/hwmon/hwmon1/temp2_input",
+        NULL
+    };
+    
+    for (int i = 0; hwmon_paths[i] != NULL; i++) {
+        int temp = read_temp_from_sysfs(hwmon_paths[i]);
+        if (temp > 0 && temp < 120) {
+            return temp;
+        }
+    }
+    return -1;
+}
+
+static int read_temp_from_thermal_zone(void) {
+    // Try thermal zone paths
+    const char* thermal_paths[] = {
+        "/sys/class/thermal/thermal_zone0/temp",
+        "/sys/class/thermal/thermal_zone1/temp",
+        "/sys/class/thermal/thermal_zone2/temp",
+        NULL
+    };
+    
+    for (int i = 0; thermal_paths[i] != NULL; i++) {
+        int temp = read_temp_from_sysfs(thermal_paths[i]);
+        if (temp > 0 && temp < 120) {
+            return temp;
+        }
+    }
+    return -1;
+}
+
+static int read_temp_from_acpi(void) {
+    // Try ACPI thermal paths
+    const char* acpi_paths[] = {
+        "/proc/acpi/thermal_zone/THM0/temperature",
+        "/proc/acpi/thermal_zone/THM1/temperature",
+        NULL
+    };
+    
+    for (int i = 0; acpi_paths[i] != NULL; i++) {
+        FILE* f = fopen(acpi_paths[i], "r");
+        if (!f) continue;
+        
+        char line[256];
+        if (fgets(line, sizeof(line), f)) {
+            // Parse ACPI format: "temperature:             45 C"
+            char* temp_str = strstr(line, "temperature:");
+            if (temp_str) {
+                temp_str += 12; // Skip "temperature:"
+                while (*temp_str == ' ' || *temp_str == '\t') temp_str++;
+                int temp = atoi(temp_str);
+                fclose(f);
+                return temp;
+            }
+        }
+        fclose(f);
+    }
+    return -1;
+}
+
+static int get_alternative_cpu_temp(void) {
+    // Try multiple sources in order of preference
+    int temp = read_temp_from_hwmon();
+    if (temp > 0) return temp;
+    
+    temp = read_temp_from_thermal_zone();
+    if (temp > 0) return temp;
+    
+    temp = read_temp_from_acpi();
+    if (temp > 0) return temp;
+    
+    return -1;
+}
+
+static bool validate_ec_temp_with_alternative(int ec_temp) {
+    static int last_alt_temp = -1;
+    static int validation_failures = 0;
+    
+    int alt_temp = get_alternative_cpu_temp();
+    if (alt_temp == -1) {
+        // No alternative source available, assume EC temp is valid
+        return true;
+    }
+    
+    int temp_diff = abs(ec_temp - alt_temp);
+    
+    // Allow some difference due to different sensor locations
+    if (temp_diff <= 15) {
+        validation_failures = 0;
+        if (debug_mode && temp_diff > 5) {
+            daemon_log(LOG_DEBUG, "Temperature validation: EC=%d°C, Alt=%d°C, diff=%d°C", 
+                      ec_temp, alt_temp, temp_diff);
+        }
+        return true;
+    }
+    
+    validation_failures++;
+    daemon_log(LOG_WARNING, "Temperature validation failed: EC=%d°C, Alt=%d°C, diff=%d°C (failures=%d)", 
+               ec_temp, alt_temp, temp_diff, validation_failures);
+    
+    // If we've had multiple validation failures, the EC sensor might be stuck
+    if (validation_failures >= 3) {
+        daemon_log(LOG_ERR, "Multiple temperature validation failures - EC sensor may be stuck");
+        return false;
+    }
+    
+    return true;
 }
 
 // Live stats implementation
