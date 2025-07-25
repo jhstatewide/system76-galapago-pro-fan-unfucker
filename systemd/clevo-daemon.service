@@ -25,6 +25,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+ReadWritePaths=/run
 #ReadWritePaths=/sys/kernel/debug/ec
 
 # Logging
