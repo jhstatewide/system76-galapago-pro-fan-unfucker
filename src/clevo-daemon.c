@@ -72,6 +72,11 @@
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
 #endif
 
+// Fan safety thresholds
+#define MIN_FAN_DUTY 25        // Minimum fan duty cycle (%)
+#define MIN_FAN_RPM 1000       // Minimum expected fan RPM
+#define RPM_DUTY_RATIO 40      // Expected minimum RPM per 1% duty cycle
+
 // Global variables
 static int debug_mode = 0;
 static int log_level = LOG_INFO;
@@ -165,6 +170,14 @@ struct {
 
 // Add global variable for quiet mode
 static int quiet_mode = 0;
+
+// Fan health monitoring state
+static struct {
+    int low_rpm_count;
+    int last_check_duty;
+    int last_check_rpm;
+    time_t last_check_time;
+} fan_health = {0};
 
 // Function declarations
 static void daemon_init_share(void);
@@ -431,6 +444,10 @@ static int daemon_ec_worker(void) {
         
         share_info->fan_duty = ec_query_fan_duty();
         share_info->fan_rpms = ec_query_fan_rpms();
+        
+        // Check fan health
+        check_fan_health();
+        
         if (debug_mode) daemon_log(LOG_DEBUG, "direct I/O: cpu_temp=%d, fan_duty=%d, fan_rpms=%d", 
             share_info->cpu_temp, share_info->fan_duty, share_info->fan_rpms);
     }
@@ -793,6 +810,28 @@ static int ec_auto_duty_adjust(void) {
                temp, setpoint, error, new_duty, temp_stuck ? "true" : "false");
     }
     
+    // Ensure duty cycle is within valid range
+    if (new_duty > 100) new_duty = 100;
+    if (new_duty < MIN_FAN_DUTY) new_duty = MIN_FAN_DUTY;  // Never go below minimum duty
+    
+    // Check if fan is potentially stuck
+    int current_rpms = share_info->fan_rpms;
+    int expected_min_rpm = new_duty * RPM_DUTY_RATIO;
+    
+    if (current_rpms < MIN_FAN_RPM || (current_rpms < expected_min_rpm * 0.7)) {  // Allow 30% tolerance
+        daemon_log(LOG_WARNING, "Fan may be stuck: RPM=%d (expected >%d) at duty=%d%%", 
+                  current_rpms, expected_min_rpm, new_duty);
+        
+        // Attempt recovery by temporarily boosting fan speed
+        new_duty = MAX(new_duty + 20, 60);  // Boost by 20% or to at least 60%
+        daemon_log(LOG_INFO, "Attempting fan recovery by setting duty to %d%%", new_duty);
+    }
+    
+    if (debug_mode) {
+        daemon_log(LOG_DEBUG, "Final duty calculation: temp=%d, setpoint=%.1f, error=%.1f, duty=%d, stuck=%s",
+               temp, setpoint, error, new_duty, temp_stuck ? "true" : "false");
+    }
+    
     return new_duty;
 }
 
@@ -812,6 +851,12 @@ static int ec_query_fan_rpms(void) {
 }
 
 static int ec_write_fan_duty(int duty_percentage) {
+    // Enforce minimum duty cycle
+    if (duty_percentage < MIN_FAN_DUTY) {
+        daemon_log(LOG_INFO, "Adjusting fan duty to minimum: %d%% -> %d%%", duty_percentage, MIN_FAN_DUTY);
+        duty_percentage = MIN_FAN_DUTY;
+    }
+    
     if (duty_percentage < 1 || duty_percentage > 100) {
         daemon_log(LOG_ERR, "Wrong fan duty to write: %d", duty_percentage);
         return EXIT_FAILURE;
@@ -1342,126 +1387,74 @@ static void adaptive_pid_tune_parameters(void) {
 
 
 static void check_fan_health(void) {
-    fan_health_counter++;
+    time_t current_time = time(NULL);
+    int current_duty = share_info->fan_duty;
+    int current_rpm = share_info->fan_rpms;
     
-    // Check fan health every fan_health_check_interval seconds
-    if (fan_health_counter >= fan_health_check_interval) {
-        fan_health_counter = 0;
-        
-        int current_rpm = share_info->fan_rpms;
-        int current_duty = share_info->fan_duty;
-        int temp = share_info->cpu_temp;  // Only use CPU temperature
-        
-        // Check if fan is stuck at low RPM despite high duty cycle
-        bool fan_health_issue = false;
-        
-        // Case 1: Very low RPM at high duty (definitely stuck)
-        if (current_rpm <= fan_stuck_threshold && current_duty > 20 && temp > target_temperature) {
-            fan_health_issue = true;
-        }
-        
-        // Case 2: Suspiciously low RPM at 100% duty (should be thousands of RPM)
-        if (current_duty >= 100 && current_rpm < 1000) {
-            fan_health_issue = true;
-            if (debug_mode) {
-                daemon_log(LOG_DEBUG, "Fan health warning: 100%% duty but only %d RPM (should be 1000+)", current_rpm);
-            }
-        }
-        
-        // Case 3: High temperature with low RPM regardless of duty
-        if (temp > target_temperature + 10 && current_rpm < 1000) {
-            fan_health_issue = true;
-            if (debug_mode) {
-                daemon_log(LOG_DEBUG, "Fan health warning: High temp %d°C but only %d RPM", temp, current_rpm);
-            }
-        }
-        
-        if (fan_health_issue) {
-            fan_stuck_counter++;
-            
-            if (debug_mode) {
-                daemon_log(LOG_DEBUG, "Fan health check: RPM=%d, duty=%d%%, temp=%d°C, stuck_counter=%d", 
-                          current_rpm, current_duty, temp, fan_stuck_counter);
-            }
-            
-            // If fan has been stuck for too long, attempt recovery
-            if (fan_stuck_counter >= fan_stuck_timeout && fan_recovery_attempts < max_fan_recovery_attempts) {
-                daemon_log(LOG_WARNING, "Fan appears stuck at low RPM (%d), attempting recovery", current_rpm);
-                
-                if (attempt_fan_recovery()) {
-                    daemon_log(LOG_INFO, "Fan recovery attempt successful");
-                    reset_fan_health_monitoring();
-                } else {
-                    fan_recovery_attempts++;
-                    daemon_log(LOG_ERR, "Fan recovery attempt failed (%d/%d)", fan_recovery_attempts, max_fan_recovery_attempts);
-                }
-            }
-            
-            // Emergency recovery for critical situations
-            if (current_duty >= 100 && current_rpm < 1000 && temp > target_temperature + 10) {
-                daemon_log(LOG_ERR, "CRITICAL: 100%% duty but only %d RPM at %d°C - attempting emergency recovery", current_rpm, temp);
-                
-                if (attempt_fan_recovery()) {
-                    daemon_log(LOG_INFO, "Emergency fan recovery successful");
-                    reset_fan_health_monitoring();
-                } else {
-                    daemon_log(LOG_ERR, "EMERGENCY: Fan recovery failed - hardware may be damaged");
-                }
-            }
-        } else {
-            // Fan is working normally, reset stuck counter
-            if (fan_stuck_counter > 0) {
-                if (debug_mode) {
-                    daemon_log(LOG_DEBUG, "Fan health check: Fan recovered, resetting stuck counter");
-                }
-                reset_fan_health_monitoring();
-            }
-        }
-        
-        last_fan_rpm = current_rpm;
+    // Only check every 30 seconds
+    if (current_time - fan_health.last_check_time < 30) {
+        return;
     }
+    
+    // Reset counters if duty cycle has changed significantly
+    if (abs(current_duty - fan_health.last_check_duty) > 5) {
+        fan_health.low_rpm_count = 0;
+    }
+    
+    int expected_min_rpm = current_duty * RPM_DUTY_RATIO;
+    
+    // Check if RPMs are too low for current duty cycle
+    if (current_rpm < MIN_FAN_RPM || (current_rpm < expected_min_rpm * 0.7)) {
+        fan_health.low_rpm_count++;
+        
+        if (fan_health.low_rpm_count >= 3) {  // Three consecutive low RPM readings
+            daemon_log(LOG_WARNING, "Persistent low fan RPM detected: %d RPM at %d%% duty", 
+                      current_rpm, current_duty);
+            attempt_fan_recovery();
+            fan_health.low_rpm_count = 0;  // Reset counter after recovery attempt
+        }
+    } else {
+        fan_health.low_rpm_count = 0;  // Reset counter when RPMs are normal
+    }
+    
+    // Update check state
+    fan_health.last_check_duty = current_duty;
+    fan_health.last_check_rpm = current_rpm;
+    fan_health.last_check_time = current_time;
 }
 
 static int attempt_fan_recovery(void) {
-    // Try to "kick" the fan by cycling through different duty cycles
-    int recovery_duties[] = {50, 80, 100, 80, 100};  // Cycle through different levels
-    int num_attempts = sizeof(recovery_duties) / sizeof(recovery_duties[0]);
+    daemon_log(LOG_INFO, "Attempting fan recovery...");
     
-    daemon_log(LOG_INFO, "Attempting fan recovery: cycling through duty cycles");
+    // Try to unstick the fan by cycling through different speeds
+    int recovery_duties[] = {100, 60, 80, 40, 90, 50, 70};
+    int num_duties = sizeof(recovery_duties) / sizeof(recovery_duties[0]);
     
-    for (int i = 0; i < num_attempts; i++) {
-        int recovery_duty = recovery_duties[i];
+    for (int i = 0; i < num_duties; i++) {
+        int duty = recovery_duties[i];
+        daemon_log(LOG_INFO, "Recovery step %d/%d: Setting fan to %d%%", 
+                  i + 1, num_duties, duty);
         
-        // Set fan to recovery duty
-        int write_result = ec_write_fan_duty(recovery_duty);
-        if (write_result != EXIT_SUCCESS) {
-            daemon_log(LOG_ERR, "Failed to write recovery duty cycle %d%%", recovery_duty);
-            continue;
-        }
-        
-        // Wait a moment for fan to respond
-        usleep(500000);  // 0.5 seconds
+        ec_write_fan_duty(duty);
+        usleep(500000);  // Wait 500ms between changes
         
         // Check if fan responded
-        int new_rpm = ec_query_fan_rpms();
-        if (new_rpm > 1000) {  // Success if RPM > 1000
-            daemon_log(LOG_INFO, "Fan recovery successful: RPM increased to %d at %d%% duty", new_rpm, recovery_duty);
-            return 1;
-        } else if (debug_mode) {
-            daemon_log(LOG_DEBUG, "Recovery attempt %d: duty=%d%%, RPM=%d", i+1, recovery_duty, new_rpm);
+        int rpm = ec_query_fan_rpms();
+        if (rpm > MIN_FAN_RPM) {
+            daemon_log(LOG_INFO, "Fan responding at %d RPM - recovery successful", rpm);
+            return EXIT_SUCCESS;
         }
     }
     
-    daemon_log(LOG_WARNING, "Fan recovery failed: all attempts exhausted");
-    return 0;
+    daemon_log(LOG_ERR, "Fan recovery failed - fan may need service");
+    return EXIT_FAILURE;
 }
 
 static void reset_fan_health_monitoring(void) {
-    fan_stuck_counter = 0;
-    fan_recovery_attempts = 0;
-    if (debug_mode) {
-        daemon_log(LOG_DEBUG, "Fan health monitoring reset");
-    }
+    fan_health.low_rpm_count = 0;
+    fan_health.last_check_duty = 0;
+    fan_health.last_check_rpm = 0;
+    fan_health.last_check_time = 0;
 }
 
 // Temperature trend tracking functions
