@@ -73,9 +73,11 @@
 #endif
 
 // Fan safety thresholds
-#define MIN_FAN_DUTY 25        // Minimum fan duty cycle (%)
-#define MIN_FAN_RPM 1000       // Minimum expected fan RPM
+#define MIN_FAN_DUTY 15        // Minimum fan duty cycle (%) - reduced from 35%
+#define MIN_FAN_RPM 500        // Absolute minimum fan RPM before emergency measures
+#define SAFE_FAN_RPM 1000      // Safe minimum fan RPM for normal operation
 #define RPM_DUTY_RATIO 40      // Expected minimum RPM per 1% duty cycle
+#define EMERGENCY_DUTY 60      // Emergency duty cycle when RPM drops too low
 
 // Global variables
 static int debug_mode = 0;
@@ -131,11 +133,6 @@ static int max_temp_change_per_cycle = 10;  // Maximum °C change per cycle (con
 
 // Fan health monitoring variables
 static int fan_health_check_interval = 30;  // Check fan health every 30 seconds
-static int fan_health_counter = 0;
-static int fan_stuck_threshold = 500;  // RPM threshold to consider fan "stuck" (increased for better detection)
-static int fan_stuck_timeout = 60;  // Seconds before considering fan stuck
-static int fan_stuck_counter = 0;
-static int last_fan_rpm = 0;
 static int fan_recovery_attempts = 0;
 static int max_fan_recovery_attempts = 3;
 
@@ -207,7 +204,6 @@ static void daemon_log(int priority, const char* format, ...);
 static void daemonize(void);
 static void check_fan_health(void);
 static int attempt_fan_recovery(void);
-static void reset_fan_health_monitoring(void);
 
 // Adaptive PID Controller functions
 static void adaptive_pid_add_temp_history(int temp);
@@ -1229,15 +1225,15 @@ static void daemon_log(int priority, const char* format, ...) {
         }
         // Store log messages in debug buffer for live stats display
         if (live_stats_mode && (debug_mode || priority <= LOG_WARNING)) {
-            char temp_buffer[256];
+            char temp_buffer[128];  // Reduced buffer size to avoid truncation
             vsnprintf(temp_buffer, sizeof(temp_buffer), format, args);
             // Add timestamp
-            char timestamp[32];
+            char timestamp[20];  // Increased from default to ensure space for timestamp
             time_t now = time(NULL);
             strftime(timestamp, sizeof(timestamp), "%H:%M:%S", localtime(&now));
-            // Store in circular buffer
-            snprintf(debug_log_buffer[debug_log_index], sizeof(debug_log_buffer[0]), 
-                    "[%s] %s", timestamp, temp_buffer);
+            // Store in circular buffer with safe string concatenation
+            snprintf(debug_log_buffer[debug_log_index], sizeof(debug_log_buffer[0]),
+                    "[%.8s] %.200s", timestamp, temp_buffer);  // Explicit length limits
             debug_log_index = (debug_log_index + 1) % 10;
             if (debug_log_count < 10) debug_log_count++;
         }
@@ -1403,15 +1399,30 @@ static void check_fan_health(void) {
     
     int expected_min_rpm = current_duty * RPM_DUTY_RATIO;
     
-    // Check if RPMs are too low for current duty cycle
-    if (current_rpm < MIN_FAN_RPM || (current_rpm < expected_min_rpm * 0.7)) {
+    // Check if RPMs are critically low
+    if (current_rpm < MIN_FAN_RPM) {
+        // Emergency response for critically low RPM
+        daemon_log(LOG_ERR, "CRITICAL: Fan RPM (%d) below minimum threshold (%d)", current_rpm, MIN_FAN_RPM);
+        ec_write_fan_duty(EMERGENCY_DUTY);  // Immediately boost fan
+        attempt_fan_recovery();  // Try recovery procedure
+        fan_health.low_rpm_count = 0;  // Reset counter after emergency response
+    }
+    // Check if RPMs are below safe operating level
+    else if (current_rpm < SAFE_FAN_RPM || (current_rpm < expected_min_rpm * 0.7)) {
         fan_health.low_rpm_count++;
         
-        if (fan_health.low_rpm_count >= 3) {  // Three consecutive low RPM readings
-            daemon_log(LOG_WARNING, "Persistent low fan RPM detected: %d RPM at %d%% duty", 
+        if (fan_health.low_rpm_count >= 2) {  // Reduced threshold for faster response
+            daemon_log(LOG_WARNING, "Low fan RPM detected: %d RPM at %d%% duty", 
                       current_rpm, current_duty);
-            attempt_fan_recovery();
-            fan_health.low_rpm_count = 0;  // Reset counter after recovery attempt
+            
+            // Increase duty cycle by 10% or to minimum safe duty
+            int new_duty = MAX(current_duty + 10, MIN_FAN_DUTY);
+            ec_write_fan_duty(new_duty);
+            daemon_log(LOG_INFO, "Increasing fan duty to %d%% to maintain safe RPM", new_duty);
+            
+            if (fan_health.low_rpm_count >= 4) {  // If problem persists, try recovery
+                attempt_fan_recovery();
+            }
         }
     } else {
         fan_health.low_rpm_count = 0;  // Reset counter when RPMs are normal
@@ -1426,8 +1437,18 @@ static void check_fan_health(void) {
 static int attempt_fan_recovery(void) {
     daemon_log(LOG_INFO, "Attempting fan recovery...");
     
-    // Try to unstick the fan by cycling through different speeds
-    int recovery_duties[] = {100, 60, 80, 40, 90, 50, 70};
+    // First try: Full speed to kick-start
+    ec_write_fan_duty(100);
+    usleep(1000000);  // Wait 1 second at full speed
+    
+    int rpm = ec_query_fan_rpms();
+    if (rpm > SAFE_FAN_RPM) {
+        daemon_log(LOG_INFO, "Fan kick-started successfully at %d RPM", rpm);
+        return EXIT_SUCCESS;
+    }
+    
+    // If kick-start didn't work, try aggressive cycling
+    int recovery_duties[] = {100, 80, 100, 60, 100, 40, 100};  // Always return to 100%
     int num_duties = sizeof(recovery_duties) / sizeof(recovery_duties[0]);
     
     for (int i = 0; i < num_duties; i++) {
@@ -1436,25 +1457,33 @@ static int attempt_fan_recovery(void) {
                   i + 1, num_duties, duty);
         
         ec_write_fan_duty(duty);
-        usleep(500000);  // Wait 500ms between changes
+        usleep(800000);  // Wait longer (800ms) between changes
         
         // Check if fan responded
-        int rpm = ec_query_fan_rpms();
-        if (rpm > MIN_FAN_RPM) {
+        rpm = ec_query_fan_rpms();
+        if (rpm > SAFE_FAN_RPM) {
             daemon_log(LOG_INFO, "Fan responding at %d RPM - recovery successful", rpm);
+            
+            // Gradually step down to ensure stability
+            for (int step = 90; step >= MIN_FAN_DUTY; step -= 10) {
+                ec_write_fan_duty(step);
+                usleep(500000);
+                rpm = ec_query_fan_rpms();
+                if (rpm < SAFE_FAN_RPM) {
+                    // If RPM drops too low during step-down, go back to higher duty
+                    ec_write_fan_duty(step + 20);
+                    daemon_log(LOG_INFO, "Maintaining higher duty (%d%%) for stability", step + 20);
+                    return EXIT_SUCCESS;
+                }
+            }
             return EXIT_SUCCESS;
         }
     }
     
-    daemon_log(LOG_ERR, "Fan recovery failed - fan may need service");
+    // If we get here, try one last emergency measure
+    ec_write_fan_duty(100);
+    daemon_log(LOG_ERR, "Fan recovery failed - setting to full speed for safety");
     return EXIT_FAILURE;
-}
-
-static void reset_fan_health_monitoring(void) {
-    fan_health.low_rpm_count = 0;
-    fan_health.last_check_duty = 0;
-    fan_health.last_check_rpm = 0;
-    fan_health.last_check_time = 0;
 }
 
 // Temperature trend tracking functions
@@ -1480,27 +1509,42 @@ static bool is_temp_stuck(void) {
     
     // Check if all recent temperatures are within the stuck threshold of the average
     int stuck_count = 0;
+    int identical_count = 0;
+    int last_temp = temp_history[0];
+    
     for (int i = 0; i < temp_history_size; i++) {
         if (fabs(temp_history[i] - avg_temp) <= stuck_temp_threshold) {
             stuck_count++;
         }
+        if (temp_history[i] == last_temp) {
+            identical_count++;
+        }
+        last_temp = temp_history[i];
     }
     
-    // If most readings are within threshold, temperature is stuck
-    bool stuck = (stuck_count >= temp_history_size * 0.8);
+    // Consider temperature stuck if:
+    // 1. Most readings are within threshold of average (standard check)
+    // 2. OR we have several identical readings in a row (new check)
+    // 3. OR temperature is high and not changing despite high fan speed
+    bool stuck = (stuck_count >= temp_history_size * 0.6) || // Reduced from 0.8 to 0.6
+                (identical_count >= temp_history_size * 0.8) ||
+                (avg_temp > target_temperature + 5 && 
+                 share_info->fan_duty > 70 && 
+                 stuck_count >= temp_history_size * 0.5);
     
     if (stuck) {
         stuck_detection_counter++;
-        if (debug_mode && stuck_detection_counter % 10 == 0) {
-            daemon_log(LOG_DEBUG, "Temperature stuck detection: avg=%.1f°C, stuck_count=%d/%d, counter=%d", 
-                      avg_temp, stuck_count, temp_history_size, stuck_detection_counter);
+        if (debug_mode && stuck_detection_counter % 5 == 0) { // Increased frequency of debug logs
+            daemon_log(LOG_DEBUG, "Temperature stuck detection: avg=%.1f°C, stuck_count=%d/%d, identical=%d/%d, counter=%d", 
+                      avg_temp, stuck_count, temp_history_size, identical_count, temp_history_size, stuck_detection_counter);
         }
     } else {
         stuck_detection_counter = 0;
     }
     
     // Consider stuck if we've detected it for multiple cycles
-    return (stuck_detection_counter >= stuck_threshold_cycles);
+    // Reduced threshold for faster detection
+    return (stuck_detection_counter >= (stuck_threshold_cycles / 2));
 }
 
 static int get_aggressive_duty_for_error(int temp_error) {
@@ -1528,6 +1572,19 @@ static bool validate_temperature_reading(int current_temp, int last_temp, const 
     
     int temp_change = abs(current_temp - last_temp);
     
+    // Check for stuck readings - if temp hasn't changed at all for multiple readings
+    static int identical_reading_count = 0;
+    if (current_temp == last_temp) {
+        identical_reading_count++;
+        if (identical_reading_count >= 10) { // 10 consecutive identical readings
+            daemon_log(LOG_WARNING, "Temperature appears stuck: %d°C unchanged for %d readings", 
+                      current_temp, identical_reading_count);
+            return false;
+        }
+    } else {
+        identical_reading_count = 0;
+    }
+    
     if (temp_change > max_temp_change_per_cycle) {
         daemon_log(LOG_WARNING, "Suspicious %s temperature change: %d°C -> %d°C (change: %d°C)", 
                    sensor_name, last_temp, current_temp, temp_change);
@@ -1549,14 +1606,47 @@ static int sanitize_temperature_reading(int current_temp, int last_temp, const c
         return current_temp;
     }
     
+    static int invalid_reading_count = 0;
+    static int last_valid_temp = 0;
+    
     if (validate_temperature_reading(current_temp, last_temp, sensor_name)) {
+        invalid_reading_count = 0;
+        last_valid_temp = current_temp;
         return current_temp;
     }
     
-    // If validation fails, use the last valid reading
-    daemon_log(LOG_WARNING, "Using last valid %s temperature: %d°C (rejected: %d°C)", 
-               sensor_name, last_temp, current_temp);
-    return last_temp;
+    invalid_reading_count++;
+    
+    // If we've had too many invalid readings, try to reset the EC
+    if (invalid_reading_count >= 5) {
+        daemon_log(LOG_WARNING, "Multiple invalid readings detected (%d in a row) - attempting EC reset", 
+                  invalid_reading_count);
+        
+        // Try to "reset" the EC by cycling fan speeds
+        ec_write_fan_duty(100); // Full speed
+        usleep(500000);         // Wait 500ms
+        ec_write_fan_duty(30);  // Low speed
+        usleep(500000);         // Wait 500ms
+        
+        // Re-read temperature after reset attempt
+        int new_temp = ec_query_cpu_temp();
+        if (new_temp != current_temp) {
+            daemon_log(LOG_INFO, "EC reset successful - new temperature reading: %d°C", new_temp);
+            invalid_reading_count = 0;
+            return new_temp;
+        }
+        
+        // If still stuck, log error and return last known good value
+        daemon_log(LOG_ERR, "EC reset failed - temperature still stuck at %d°C", current_temp);
+    }
+    
+    // Use the last valid temperature, but with a slight bias towards cooling
+    // This ensures we don't get stuck in a dangerous high-temperature state
+    if (last_valid_temp > target_temperature) {
+        return last_valid_temp + 2; // Bias towards more cooling when temp was high
+    }
+    
+    return last_valid_temp;
 }
 
 // Live stats implementation
