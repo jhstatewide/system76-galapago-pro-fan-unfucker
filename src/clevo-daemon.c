@@ -61,7 +61,6 @@
 
 #define EC_REG_SIZE 0x100
 #define EC_REG_CPU_TEMP 0x07
-#define EC_REG_GPU_TEMP 0xCD
 #define EC_REG_FAN_DUTY 0xCE
 #define EC_REG_FAN_RPMS_HI 0xD0
 #define EC_REG_FAN_RPMS_LO 0xD1
@@ -90,7 +89,6 @@ static double live_stats_interval = 0.1;  // 100ms default
 static WINDOW* live_stats_window = NULL;
 static int live_stats_initialized = 0;
 static int last_display_cpu_temp = -1;
-static int last_display_gpu_temp = -1;
 static int last_display_fan_duty = -1;
 static int last_display_fan_rpm = -1;
 static double last_display_pid_error = -999.0;
@@ -123,7 +121,6 @@ static double stuck_temp_threshold = 2.0;  // Temperature change threshold for s
 
 // Temperature validation for sensor glitch detection
 static int last_cpu_temp = 0;
-static int last_gpu_temp = 0;
 static int temp_validation_enabled = 1;  // Enable temperature validation by default
 static int max_temp_change_per_cycle = 10;  // Maximum °C change per cycle (configurable)
 
@@ -158,7 +155,6 @@ static double adaptive_target_performance = 0.8;  // Target performance score
 struct {
     volatile int exit;
     volatile int cpu_temp;
-    volatile int gpu_temp;
     volatile int fan_duty;
     volatile int fan_rpms;
     volatile int auto_duty;
@@ -179,7 +175,7 @@ static int daemon_test_fan(int duty_percentage);
 static int ec_init(void);
 static int ec_auto_duty_adjust(void);
 static int ec_query_cpu_temp(void);
-static int ec_query_gpu_temp(void);
+
 static int ec_query_fan_duty(void);
 static int ec_query_fan_rpms(void);
 static int ec_write_fan_duty(int duty_percentage);
@@ -358,7 +354,6 @@ static void daemon_init_share(void) {
     share_info = shm;
     share_info->exit = 0;
     share_info->cpu_temp = 0;
-    share_info->gpu_temp = 0;
     share_info->fan_duty = 0;
     share_info->fan_rpms = 0;
     share_info->auto_duty = 1;
@@ -400,23 +395,18 @@ static int daemon_ec_worker(void) {
             case 0x100:
                 // Validate and sanitize temperature readings
                 int raw_cpu_temp = buf[EC_REG_CPU_TEMP];
-                int raw_gpu_temp = buf[EC_REG_GPU_TEMP];
                 
                 share_info->cpu_temp = sanitize_temperature_reading(raw_cpu_temp, last_cpu_temp, "CPU");
-                share_info->gpu_temp = sanitize_temperature_reading(raw_gpu_temp, last_gpu_temp, "GPU");
                 
                 // Update last valid temperatures
                 if (share_info->cpu_temp == raw_cpu_temp) {
                     last_cpu_temp = raw_cpu_temp;
                 }
-                if (share_info->gpu_temp == raw_gpu_temp) {
-                    last_gpu_temp = raw_gpu_temp;
-                }
                 
                 share_info->fan_duty = calculate_fan_duty(buf[EC_REG_FAN_DUTY]);
                 share_info->fan_rpms = calculate_fan_rpms(buf[EC_REG_FAN_RPMS_HI], buf[EC_REG_FAN_RPMS_LO]);
-                if (debug_mode) daemon_log(LOG_DEBUG, "sysfs: cpu_temp=%d, gpu_temp=%d, fan_duty=%d, fan_rpms=%d", 
-                    share_info->cpu_temp, share_info->gpu_temp, share_info->fan_duty, share_info->fan_rpms);
+                if (debug_mode) daemon_log(LOG_DEBUG, "sysfs: cpu_temp=%d, fan_duty=%d, fan_rpms=%d", 
+                    share_info->cpu_temp, share_info->fan_duty, share_info->fan_rpms);
                 break;
             default:
                 if (debug_mode) daemon_log(LOG_DEBUG, "wrong EC size from sysfs: %ld", len);
@@ -431,28 +421,18 @@ static int daemon_ec_worker(void) {
         
         // Validate and sanitize temperature readings
         int raw_cpu_temp = ec_query_cpu_temp();
-        int raw_gpu_temp = ec_query_gpu_temp();
         
         share_info->cpu_temp = sanitize_temperature_reading(raw_cpu_temp, last_cpu_temp, "CPU");
-        share_info->gpu_temp = sanitize_temperature_reading(raw_gpu_temp, last_gpu_temp, "GPU");
         
         // Update last valid temperatures
         if (share_info->cpu_temp == raw_cpu_temp) {
             last_cpu_temp = raw_cpu_temp;
         }
-        if (share_info->gpu_temp == raw_gpu_temp) {
-            last_gpu_temp = raw_gpu_temp;
-        }
         
         share_info->fan_duty = ec_query_fan_duty();
         share_info->fan_rpms = ec_query_fan_rpms();
-        if (debug_mode) daemon_log(LOG_DEBUG, "direct I/O: cpu_temp=%d, gpu_temp=%d, fan_duty=%d, fan_rpms=%d", 
-            share_info->cpu_temp, share_info->gpu_temp, share_info->fan_duty, share_info->fan_rpms);
-        
-        // Additional debugging for temperature validation
-        if (debug_mode && share_info->gpu_temp == 0) {
-            daemon_log(LOG_DEBUG, "Warning: GPU temperature reading is 0°C - sensor may be unavailable");
-        }
+        if (debug_mode) daemon_log(LOG_DEBUG, "direct I/O: cpu_temp=%d, fan_duty=%d, fan_rpms=%d", 
+            share_info->cpu_temp, share_info->fan_duty, share_info->fan_rpms);
     }
     
     // Check fan health
@@ -464,18 +444,13 @@ static int daemon_ec_worker(void) {
         if (debug_mode) daemon_log(LOG_DEBUG, "auto_duty=1, next_duty=%d, prev_auto_duty_val=%d", next_duty, share_info->auto_duty_val);
         
         // Emergency bypass: Always write if we're in emergency mode, even if duty hasn't changed
-        int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+        int temp = share_info->cpu_temp;  // Only use CPU temperature
         bool emergency_mode = (temp >= target_temperature + 10) || (temp >= target_temperature + 5 && next_duty >= 80);
-        
-        // Log GPU temperature issues for debugging
-        if (share_info->gpu_temp == 0 && debug_mode) {
-            daemon_log(LOG_DEBUG, "GPU temperature reading is 0°C - this may indicate a sensor issue");
-        }
         
         if (next_duty != 0 && (next_duty != share_info->auto_duty_val || emergency_mode)) {
             char s_time[256];
             get_time_string(s_time, 256, "%m/%d %H:%M:%S");
-            daemon_log(LOG_INFO, "%s CPU=%d°C, GPU=%d°C, auto fan duty to %d%%", s_time, share_info->cpu_temp, share_info->gpu_temp, next_duty);
+            daemon_log(LOG_INFO, "%s CPU=%d°C, auto fan duty to %d%%", s_time, share_info->cpu_temp, next_duty);
             int write_result = ec_write_fan_duty(next_duty);
             if (debug_mode) daemon_log(LOG_DEBUG, "ec_write_fan_duty (auto) returned: %d", write_result);
             share_info->auto_duty_val = next_duty;
@@ -495,7 +470,6 @@ static int daemon_dump_fan(void) {
     printf("  FAN Duty: %d%%\n", ec_query_fan_duty());
     printf("  FAN RPMs: %d RPM\n", ec_query_fan_rpms());
     printf("  CPU Temp: %d°C\n", ec_query_cpu_temp());
-    printf("  GPU Temp: %d°C\n", ec_query_gpu_temp());
     return EXIT_SUCCESS;
 }
 
@@ -539,7 +513,7 @@ static int ec_init(void) {
 static int ec_auto_duty_adjust(void) {
     if (!pid_enabled) {
         // Fall back to simple control if PID is disabled
-        int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+        int temp = share_info->cpu_temp;  // Only use CPU temperature
         int duty = share_info->fan_duty;
         int new_duty = duty;
 
@@ -568,19 +542,7 @@ static int ec_auto_duty_adjust(void) {
     // 6. Minimum duty: 30% when above target to ensure cooling
 
     // PID Controller implementation
-    int temp;
-    
-    // Handle case where GPU temperature is unavailable (0°C reading)
-    if (share_info->gpu_temp == 0) {
-        // Use CPU temperature only if GPU is unavailable
-        temp = share_info->cpu_temp;
-        if (debug_mode) {
-            daemon_log(LOG_DEBUG, "GPU temperature unavailable (0°C), using CPU temperature only: %d°C", temp);
-        }
-    } else {
-        // Use the higher of CPU and GPU temperatures
-        temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
-    }
+    int temp = share_info->cpu_temp;  // Only use CPU temperature
     double setpoint = (double)target_temperature;
     double process_variable = (double)temp;
     double error = process_variable - setpoint;
@@ -836,10 +798,6 @@ static int ec_auto_duty_adjust(void) {
 
 static int ec_query_cpu_temp(void) {
     return ec_io_read(EC_REG_CPU_TEMP);
-}
-
-static int ec_query_gpu_temp(void) {
-    return ec_io_read(EC_REG_GPU_TEMP);
 }
 
 static int ec_query_fan_duty(void) {
@@ -1298,7 +1256,7 @@ static double adaptive_pid_calculate_oscillation(void) {
 }
 
 static double adaptive_pid_calculate_performance_score(void) {
-    int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+    int temp = share_info->cpu_temp;  // Only use CPU temperature
     double error = fabs((double)temp - (double)target_temperature);
     double oscillation = adaptive_pid_calculate_oscillation();
     
@@ -1351,7 +1309,7 @@ static void adaptive_pid_tune_parameters(void) {
     
     // Adjust Ki (integral gain)
     double oscillation = adaptive_pid_calculate_oscillation();
-    int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+    int temp = share_info->cpu_temp;  // Only use CPU temperature
     double error = fabs((double)temp - (double)target_temperature);
     
     if (oscillation > 3.0) {
@@ -1392,7 +1350,7 @@ static void check_fan_health(void) {
         
         int current_rpm = share_info->fan_rpms;
         int current_duty = share_info->fan_duty;
-        int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+        int temp = share_info->cpu_temp;  // Only use CPU temperature
         
         // Check if fan is stuck at low RPM despite high duty cycle
         bool fan_health_issue = false;
@@ -1673,10 +1631,9 @@ static void live_stats_display(void) {
     
     // Get current values
     int cpu_temp = share_info->cpu_temp;
-    int gpu_temp = share_info->gpu_temp;
     int fan_duty = share_info->fan_duty;
     int fan_rpm = share_info->fan_rpms;
-    int max_temp = MAX(cpu_temp, gpu_temp);
+    int max_temp = cpu_temp;  // Only use CPU temperature
     
     // Calculate PID values for display
     double pid_error = 0.0, pid_p = 0.0, pid_i = 0.0, pid_d = 0.0;
@@ -1710,7 +1667,7 @@ static void live_stats_display(void) {
     mvprintw(2, max_x - 1, "+");
     
     // Temperature section - only update if changed
-    if (cpu_temp != last_display_cpu_temp || gpu_temp != last_display_gpu_temp) {
+    if (cpu_temp != last_display_cpu_temp) {
         mvprintw(3, 2, "Temperature:                                ");
         // CPU temperature with color coding
         if (cpu_temp > target_temperature + 10) {
@@ -1722,20 +1679,7 @@ static void live_stats_display(void) {
         }
         mvprintw(4, 4, "CPU: %3d°C            ", cpu_temp);
         attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
-        // GPU temperature with color coding
-        if (gpu_temp > target_temperature + 10) {
-            attron(COLOR_PAIR(3));
-        } else if (gpu_temp > target_temperature) {
-            attron(COLOR_PAIR(2));
-        } else {
-            attron(COLOR_PAIR(1));
-        }
-        mvprintw(4, 30, "GPU: %3d°C            ", gpu_temp);
-        attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
-        // Max temperature
-        mvprintw(4, 56, "Max: %3d°C            ", max_temp);
         last_display_cpu_temp = cpu_temp;
-        last_display_gpu_temp = gpu_temp;
     }
     
     // Draw separator
@@ -1902,7 +1846,6 @@ static void live_stats_handle_input(void) {
         } else if (ch == 'r' || ch == 'R') {
             // Force refresh by clearing display cache
             last_display_cpu_temp = -1;
-            last_display_gpu_temp = -1;
             last_display_fan_duty = -1;
             last_display_fan_rpm = -1;
             last_display_pid_error = -999.0;

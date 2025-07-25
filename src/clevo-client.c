@@ -22,6 +22,7 @@
 #include <signal.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <ncurses.h>
 
 #define SOCKET_PATH "/run/clevo-daemon.sock"
@@ -44,6 +45,7 @@ typedef enum {
     CMD_SET_MAX_DUTY_DECREASE,
     CMD_GET_MAX_DUTY_DECREASE,
     CMD_LIVE_STATS,
+    CMD_RECOVER_TEMP,
     CMD_HELP
 } CommandType;
 
@@ -74,13 +76,12 @@ static void monitor_loop(int sock);
 static void parse_arguments(int argc, char* argv[]);
 static int format_json_status(const char* response, char* json_buffer, size_t size);
 
-// Live stats variables
-static WINDOW* live_stats_window = NULL;
-static int live_stats_initialized = 0;
-static int last_display_cpu_temp = -1;
-static int last_display_gpu_temp = -1;
-static int last_display_fan_duty = -1;
-static int last_display_fan_rpm = -1;
+    // Live stats variables
+    static WINDOW* live_stats_window = NULL;
+    static int live_stats_initialized = 0;
+    static int last_display_cpu_temp = -1;
+    static int last_display_fan_duty = -1;
+    static int last_display_fan_rpm = -1;
 
 // Live stats function declarations
 static void live_stats_init(void);
@@ -184,14 +185,13 @@ int main(int argc, char* argv[]) {
                 if (send_command(sock, command) == 0) {
                     char response[BUFFER_SIZE];
                     if (receive_response(sock, response, sizeof(response)) == 0) {
-                        int cpu_temp, gpu_temp;
-                        if (sscanf(response, "CPU:%d GPU:%d", &cpu_temp, &gpu_temp) == 2) {
+                        int cpu_temp;
+                        if (sscanf(response, "CPU:%d", &cpu_temp) == 1) {
                             printf("Current Temperatures:\n");
                             printf("  CPU: %d°C\n", cpu_temp);
-                            printf("  GPU: %d°C\n", gpu_temp);
                             
                             // Temperature status
-                            int max_temp = (cpu_temp > gpu_temp) ? cpu_temp : gpu_temp;
+                            int max_temp = cpu_temp;
                             if (max_temp >= 80) {
                                 printf("  Status: \033[31mCRITICAL\033[0m (Consider reducing load)\n");
                             } else if (max_temp >= 70) {
@@ -212,8 +212,8 @@ int main(int argc, char* argv[]) {
         case CMD_TEMP_MONITOR:
             {
                 printf("Temperature Monitor - Press Ctrl+C to exit\n");
-                printf("Time\t\tCPU\tGPU\tStatus\n");
-                printf("----\t\t---\t---\t------\n");
+                printf("Time\t\tCPU\tStatus\n");
+                printf("----\t\t---\t------\n");
                 
                 while (running) {
                     char command[64];
@@ -221,8 +221,8 @@ int main(int argc, char* argv[]) {
                     if (send_command(sock, command) == 0) {
                         char response[BUFFER_SIZE];
                         if (receive_response(sock, response, sizeof(response)) == 0) {
-                            int cpu_temp, gpu_temp;
-                            if (sscanf(response, "CPU:%d GPU:%d", &cpu_temp, &gpu_temp) == 2) {
+                            int cpu_temp;
+                            if (sscanf(response, "CPU:%d", &cpu_temp) == 1) {
                                 time_t now = time(NULL);
                                 struct tm *tm_info = localtime(&now);
                                 char time_str[20];
@@ -231,7 +231,7 @@ int main(int argc, char* argv[]) {
                                 // Determine status color and message
                                 const char* status_color = "";
                                 const char* status_msg = "";
-                                int max_temp = (cpu_temp > gpu_temp) ? cpu_temp : gpu_temp;
+                                int max_temp = cpu_temp;
                                 
                                 if (max_temp >= 80) {
                                     status_color = "\033[31m";  // Red
@@ -247,8 +247,8 @@ int main(int argc, char* argv[]) {
                                     status_msg = "NORMAL";
                                 }
                                 
-                                printf("%s\t%d°C\t%d°C\t%s%s\033[0m\n", 
-                                       time_str, cpu_temp, gpu_temp, status_color, status_msg);
+                                printf("%s\t%d°C\t%s%s\033[0m\n", 
+                                       time_str, cpu_temp, status_color, status_msg);
                             }
                         }
                     }
@@ -355,27 +355,69 @@ int main(int argc, char* argv[]) {
             }
             break;
         }
+        case CMD_RECOVER_TEMP: {
+            char command[64];
+            snprintf(command, sizeof(command), "RECOVER_TEMP");
+            if (send_command(sock, command) == 0) {
+                char response[BUFFER_SIZE];
+                if (receive_response(sock, response, sizeof(response)) == 0) {
+                    printf("Temperature recovery: %s\n", response);
+                }
+            }
+            break;
+        }
         case CMD_LIVE_STATS:
-            live_stats_init();
-            while (running) {
-                int display_status = live_stats_display(sock);
+            {
+                // Set up signal handling before initializing curses
+                signal(SIGINT, signal_handler);
+                signal(SIGTERM, signal_handler);
                 
-                // Check if we need to reconnect
-                if (display_status == -2) { // -2 indicates broken pipe
-                    // Connection lost, try to reconnect
-                    close(sock);
-                    sock = connect_to_daemon();
-                    if (sock < 0) {
-                        // Failed to reconnect, show error and exit
-                        live_stats_cleanup();
-                        printf("Failed to reconnect to daemon. Exiting...\n");
-                        return EXIT_FAILURE;
+                // Check terminal size before initializing ncurses
+                FILE* tty = fopen("/dev/tty", "r");
+                if (tty) {
+                    int fd = fileno(tty);
+                    struct winsize ws;
+                    if (ioctl(fd, TIOCGWINSZ, &ws) == 0) {
+                        if (ws.ws_row < 8 || ws.ws_col < 40) {
+                            fclose(tty);
+                            fprintf(stderr, "Terminal too small! Current size: %d rows x %d columns\n", 
+                                    ws.ws_row, ws.ws_col);
+                            fprintf(stderr, "Live stats mode requires at least 8 rows x 40 columns\n");
+                            fprintf(stderr, "Falling back to monitor mode...\n");
+                            // Fall back to monitor mode
+                            monitor_loop(sock);
+                            return EXIT_SUCCESS;
+                        }
                     }
+                    fclose(tty);
                 }
                 
-                usleep((int)(config.monitor_interval * 1000000));
+                live_stats_init();
+                while (running) {
+                    int display_status = live_stats_display(sock);
+                    
+                    // Check if we need to reconnect
+                    if (display_status == -2) { // -2 indicates broken pipe
+                        // Connection lost, try to reconnect
+                        close(sock);
+                        sock = connect_to_daemon();
+                        if (sock < 0) {
+                            // Failed to reconnect, show error and exit
+                            live_stats_cleanup();
+                            printf("Failed to reconnect to daemon. Exiting...\n");
+                            return EXIT_FAILURE;
+                        }
+                    }
+                    
+                    // Check if we should exit
+                    if (!running) {
+                        break;
+                    }
+                    
+                    usleep((int)(config.monitor_interval * 1000000));
+                }
+                live_stats_cleanup();
             }
-            live_stats_cleanup();
             break;
             
         case CMD_HELP:
@@ -425,6 +467,10 @@ static int send_command(int sock, const char* command) {
 static int receive_response(int sock, char* buffer, size_t size) {
     ssize_t received = recv(sock, buffer, size - 1, 0);
     if (received < 0) {
+        if (errno == EINTR) {
+            // Interrupted system call - this is normal during signal handling
+            return -1;
+        }
         perror("recv");
         return -1;
     }
@@ -433,11 +479,11 @@ static int receive_response(int sock, char* buffer, size_t size) {
 }
 
 static void print_status(const char* response) {
-    // Parse response format: "CPU:XX GPU:XX FAN_DUTY:XX FAN_RPM:XX AUTO:XX"
-    int cpu_temp, gpu_temp, fan_duty, fan_rpm, auto_mode;
+    // Parse response format: "CPU:XX FAN_DUTY:XX FAN_RPM:XX AUTO:XX"
+    int cpu_temp, fan_duty, fan_rpm, auto_mode;
     
-    if (sscanf(response, "CPU:%d GPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d", 
-                &cpu_temp, &gpu_temp, &fan_duty, &fan_rpm, &auto_mode) == 5) {
+    if (sscanf(response, "CPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d", 
+                &cpu_temp, &fan_duty, &fan_rpm, &auto_mode) == 4) {
         
         printf("\n=== Clevo Fan Control Status ===\n");
         
@@ -446,15 +492,11 @@ static void print_status(const char* response) {
         const char* cpu_color = (cpu_temp >= 80) ? "\033[31m" : 
                                (cpu_temp >= 70) ? "\033[33m" : 
                                (cpu_temp >= 60) ? "\033[36m" : "\033[32m";
-        const char* gpu_color = (gpu_temp >= 80) ? "\033[31m" : 
-                               (gpu_temp >= 70) ? "\033[33m" : 
-                               (gpu_temp >= 60) ? "\033[36m" : "\033[32m";
         
         printf("  CPU: %s%d°C\033[0m\n", cpu_color, cpu_temp);
-        printf("  GPU: %s%d°C\033[0m\n", gpu_color, gpu_temp);
         
         // Temperature status
-        int max_temp = (cpu_temp > gpu_temp) ? cpu_temp : gpu_temp;
+        int max_temp = cpu_temp;
         const char* status_color = (max_temp >= 80) ? "\033[31m" : 
                                   (max_temp >= 70) ? "\033[33m" : 
                                   (max_temp >= 60) ? "\033[36m" : "\033[32m";
@@ -517,7 +559,12 @@ static void monitor_loop(int sock) {
 static void signal_handler(int sig) {
     (void)sig;
     running = 0;
-    printf("\nStopping monitor...\n");
+    printf("\nSignal received, stopping...\n");
+    
+    // Clean up curses if it's initialized
+    if (live_stats_initialized) {
+        live_stats_cleanup();
+    }
 }
 
 static void print_help(void) {
@@ -537,6 +584,7 @@ static void print_help(void) {
     printf("  --set-max-decrease-rate N   Set max fan duty decrease per cycle (1-100)\n");
     printf("  --get-max-increase-rate     Show current max fan duty increase per cycle\n");
     printf("  --get-max-decrease-rate     Show current max fan duty decrease per cycle\n");
+    printf("  --recover-temp              Force temperature sensor recovery\n");
     printf("  --temp-monitor [INTERVAL] Monitor temperatures continuously (default: 2.0s)\n");
     printf("  --help                Show this help message\n\n");
     printf("Options:\n");
@@ -571,6 +619,7 @@ static void parse_arguments(int argc, char* argv[]) {
         {"get-max-increase-rate", no_argument, 0, 0x10C},
         {"set-max-decrease-rate", required_argument, 0, 0x10D},
         {"get-max-decrease-rate", no_argument, 0, 0x10E},
+        {"recover-temp", no_argument, 0, 0x10F},
         {"verbose", no_argument, 0, 'v'},
         {"json", no_argument, 0, 'j'},
         {"help", no_argument, 0, 'h'},
@@ -665,6 +714,9 @@ static void parse_arguments(int argc, char* argv[]) {
             case 0x10E: // --get-max-decrease-rate
                 config.type = CMD_GET_MAX_DUTY_DECREASE;
                 break;
+            case 0x10F: // --recover-temp
+                config.type = CMD_RECOVER_TEMP;
+                break;
             case 'v':
                 config.verbose = 1;
                 break;
@@ -687,20 +739,19 @@ static void parse_arguments(int argc, char* argv[]) {
 }
 
 static int format_json_status(const char* response, char* json_buffer, size_t size) {
-    int cpu_temp, gpu_temp, fan_duty, fan_rpm, auto_mode;
+    int cpu_temp, fan_duty, fan_rpm, auto_mode;
     
-    if (sscanf(response, "CPU:%d GPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d", 
-                &cpu_temp, &gpu_temp, &fan_duty, &fan_rpm, &auto_mode) == 5) {
+    if (sscanf(response, "CPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d", 
+                &cpu_temp, &fan_duty, &fan_rpm, &auto_mode) == 4) {
         
         snprintf(json_buffer, size,
                 "{\n"
                 "  \"cpu_temperature\": %d,\n"
-                "  \"gpu_temperature\": %d,\n"
                 "  \"fan_duty_cycle\": %d,\n"
                 "  \"fan_rpm\": %d,\n"
                 "  \"auto_mode\": %s\n"
                 "}",
-                cpu_temp, gpu_temp, fan_duty, fan_rpm, auto_mode ? "true" : "false");
+                cpu_temp, fan_duty, fan_rpm, auto_mode ? "true" : "false");
         return 0;
     }
     
@@ -709,17 +760,57 @@ static int format_json_status(const char* response, char* json_buffer, size_t si
 
 // Live stats implementation
 static void live_stats_init(void) {
-    // Initialize ncurses
-    initscr();
-    cbreak();
-    noecho();
-    // curs_set(0);  // Hide cursor - removed due to terminal compatibility issues
-    // keypad(stdscr, TRUE);  // Removed due to terminal compatibility issues
-    nodelay(stdscr, TRUE);  // Non-blocking input
+    // Initialize ncurses with proper error handling
+    if (initscr() == NULL) {
+        fprintf(stderr, "Failed to initialize ncurses\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Check terminal size first
+    int max_y, max_x;
+    getmaxyx(stdscr, max_y, max_x);
+    
+    if (max_y < 8 || max_x < 40) {
+        endwin();
+        fprintf(stderr, "Terminal too small! Current size: %d rows x %d columns\n", max_y, max_x);
+        fprintf(stderr, "Live stats mode requires at least 8 rows x 40 columns\n");
+        fprintf(stderr, "Please resize your terminal or use --monitor instead\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Set up terminal modes with error checking
+    if (cbreak() == ERR) {
+        fprintf(stderr, "Failed to set cbreak mode\n");
+        endwin();
+        exit(EXIT_FAILURE);
+    }
+    
+    if (noecho() == ERR) {
+        fprintf(stderr, "Failed to set noecho mode\n");
+        endwin();
+        exit(EXIT_FAILURE);
+    }
+    
+    // Try to hide cursor, but don't fail if it doesn't work
+    curs_set(0);
+    
+    // Try to enable keypad, but don't fail if it doesn't work
+    keypad(stdscr, TRUE);
+    
+    // Set non-blocking input
+    if (nodelay(stdscr, TRUE) == ERR) {
+        fprintf(stderr, "Failed to set non-blocking input\n");
+        endwin();
+        exit(EXIT_FAILURE);
+    }
     
     // Enable colors if available
     if (has_colors()) {
-        start_color();
+        if (start_color() == ERR) {
+            fprintf(stderr, "Failed to start colors\n");
+            endwin();
+            exit(EXIT_FAILURE);
+        }
         init_pair(1, COLOR_GREEN, COLOR_BLACK);   // Normal
         init_pair(2, COLOR_YELLOW, COLOR_BLACK);  // Warning
         init_pair(3, COLOR_RED, COLOR_BLACK);     // Error
@@ -733,7 +824,7 @@ static void live_stats_init(void) {
     
     // Clear screen and draw initial layout
     clear();
-    // refresh();  // Removed due to terminal compatibility issues
+    refresh();
     
     // Handle window resize
     live_stats_handle_resize();
@@ -749,12 +840,13 @@ static void live_stats_handle_resize(void) {
     if (max_y < 8 || max_x < 40) {
         clear();
         mvprintw(max_y/2, (max_x-40)/2, "Window too small! Need 40x8 minimum");
-        // refresh();  // Removed due to terminal compatibility issues
+        refresh();
         return;
     }
     
     // Clear screen for redraw
     clear();
+    refresh();
 }
 
 static int live_stats_display(int sock) {
@@ -766,14 +858,10 @@ static int live_stats_display(int sock) {
     getmaxyx(stdscr, max_y, max_x);
     
     // Check window size
-    // Temporarily disabled window size check
-    /*
     if (max_y < 8 || max_x < 40) {
-        printf("DEBUG: Window too small\n");
         live_stats_handle_resize();
         return -1; // Indicate window too small
     }
-    */
     
     // Get current status from daemon
     char command[64];
@@ -782,13 +870,13 @@ static int live_stats_display(int sock) {
     
     // Try to get status from daemon
     int comm_success = 0;
-    int cpu_temp = 0, gpu_temp = 0, fan_duty = 0, fan_rpm = 0, auto_mode = 0;
+    int cpu_temp = 0, fan_duty = 0, fan_rpm = 0, auto_mode = 0;
     
     int send_result = send_command(sock, command);
     if (send_result == 0 && receive_response(sock, response, sizeof(response)) == 0) {
         // Parse response
-        if (sscanf(response, "CPU:%d GPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d", 
-                    &cpu_temp, &gpu_temp, &fan_duty, &fan_rpm, &auto_mode) == 5) {
+        if (sscanf(response, "CPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d", 
+                    &cpu_temp, &fan_duty, &fan_rpm, &auto_mode) == 4) {
             comm_success = 1;
         }
     } else if (send_result == -2) {
@@ -797,7 +885,7 @@ static int live_stats_display(int sock) {
     }
     
     if (comm_success) {
-        int max_temp = (cpu_temp > gpu_temp) ? cpu_temp : gpu_temp;
+        int max_temp = cpu_temp;
         
         // Draw header
         attron(COLOR_PAIR(5) | A_BOLD);
@@ -818,7 +906,7 @@ static int live_stats_display(int sock) {
         mvprintw(2, max_x - 1, "+");
         
         // Temperature section - only update if changed
-        if (cpu_temp != last_display_cpu_temp || gpu_temp != last_display_gpu_temp) {
+        if (cpu_temp != last_display_cpu_temp) {
             mvprintw(3, 2, "Temperature:                                ");
             // CPU temperature with color coding
             if (cpu_temp >= 80) {
@@ -830,20 +918,7 @@ static int live_stats_display(int sock) {
             }
             mvprintw(4, 4, "CPU: %3d°C            ", cpu_temp);
             attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
-            // GPU temperature with color coding
-            if (gpu_temp >= 80) {
-                attron(COLOR_PAIR(3));
-            } else if (gpu_temp >= 70) {
-                attron(COLOR_PAIR(2));
-            } else {
-                attron(COLOR_PAIR(1));
-            }
-            mvprintw(4, 30, "GPU: %3d°C            ", gpu_temp);
-            attroff(COLOR_PAIR(1) | COLOR_PAIR(2) | COLOR_PAIR(3));
-            // Max temperature
-            mvprintw(4, 56, "Max: %3d°C            ", max_temp);
             last_display_cpu_temp = cpu_temp;
-            last_display_gpu_temp = gpu_temp;
         }
         
         // Draw separator
@@ -920,6 +995,12 @@ static int live_stats_display(int sock) {
         attron(COLOR_PAIR(4));
         mvprintw(11, 2, "Press 'q' to quit, 'r' to refresh display");
         attroff(COLOR_PAIR(4));
+        
+        // Handle input
+        live_stats_handle_input();
+        
+        // Refresh display
+        refresh();
         return 0; // Indicate success
     } else {
         // Communication failed - show error message
@@ -932,21 +1013,20 @@ static int live_stats_display(int sock) {
         mvprintw(max_y/2 + 1, (max_x - 40)/2, "Check if clevo-daemon is running");
         mvprintw(max_y/2 + 3, (max_x - 30)/2, "Press 'q' to quit");
         attroff(COLOR_PAIR(4));
+        
+        // Handle input
+        live_stats_handle_input();
+        
+        // Refresh display
+        refresh();
         return -1; // Indicate communication failure
     }
-    
-    // Handle input
-    live_stats_handle_input();
-    
-    // Refresh display
-    refresh();
-    return 0; // Indicate success
 }
 
 static void live_stats_cleanup(void) {
     if (live_stats_initialized) {
         // Restore terminal
-        // curs_set(1);  // Show cursor - removed due to terminal compatibility issues
+        curs_set(1);  // Show cursor
         endwin();
         live_stats_initialized = 0;
         live_stats_window = NULL;
@@ -962,7 +1042,6 @@ static void live_stats_handle_input(void) {
         } else if (ch == 'r' || ch == 'R') {
             // Force refresh by clearing display cache
             last_display_cpu_temp = -1;
-            last_display_gpu_temp = -1;
             last_display_fan_duty = -1;
             last_display_fan_rpm = -1;
         }

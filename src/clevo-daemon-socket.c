@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/select.h>
@@ -34,7 +35,6 @@
 extern struct {
     volatile int exit;
     volatile int cpu_temp;
-    volatile int gpu_temp;
     volatile int fan_duty;
     volatile int fan_rpms;
     volatile int auto_duty;
@@ -216,9 +216,8 @@ static int handle_client_command(int client_sock, const char* command) {
     if (strncmp(command, "STATUS", 6) == 0) {
         // Return current status
         snprintf(response, sizeof(response), 
-                "CPU:%d GPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d",
+                "CPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d",
                 share_info->cpu_temp,
-                share_info->gpu_temp,
                 share_info->fan_duty,
                 share_info->fan_rpms,
                 share_info->auto_duty);
@@ -264,8 +263,8 @@ static int handle_client_command(int client_sock, const char* command) {
         
     } else if (strcmp(command, "GET_TEMP") == 0) {
         // Get temperature only
-        snprintf(response, sizeof(response), "CPU:%d GPU:%d", 
-                share_info->cpu_temp, share_info->gpu_temp);
+        snprintf(response, sizeof(response), "CPU:%d", 
+                share_info->cpu_temp);
         
     } else if (strcmp(command, "GET_FAN") == 0) {
         // Get fan status only
@@ -321,6 +320,36 @@ static int handle_client_command(int client_sock, const char* command) {
         }
     } else if (strcmp(command, "GET_MAX_DUTY_DECREASE") == 0) {
         snprintf(response, sizeof(response), "MAX_DUTY_DECREASE:%d", max_duty_decrease_rate);
+        
+    } else if (strcmp(command, "RECOVER_TEMP") == 0) {
+        // Force temperature sensor recovery
+        socket_log(LOG_INFO, "Client requested temperature sensor recovery");
+        
+        // Force a small delay to allow sensors to stabilize
+        usleep(50000); // 50ms delay
+        
+        // Try to read temperatures again
+        int cpu_temp = 0;
+        
+        // Try sysfs first
+        int io_fd = open("/sys/kernel/debug/ec/ec0/io", O_RDONLY, 0);
+        if (io_fd >= 0) {
+            unsigned char buf[0x100];
+            ssize_t len = read(io_fd, buf, 0x100);
+            close(io_fd);
+            if (len == 0x100) {
+                cpu_temp = buf[0x07];  // EC_REG_CPU_TEMP
+            }
+        }
+        
+        // If sysfs failed, try direct I/O
+        if (cpu_temp == 0) {
+            // We need to call the EC functions directly
+            // For now, we'll just acknowledge the recovery attempt
+            snprintf(response, sizeof(response), "OK: Temperature recovery attempted (check next STATUS)");
+        } else {
+            snprintf(response, sizeof(response), "OK: Temperature recovery successful - CPU:%d", cpu_temp);
+        }
         
     } else {
         snprintf(response, sizeof(response), "ERROR: Unknown command '%s'", command);

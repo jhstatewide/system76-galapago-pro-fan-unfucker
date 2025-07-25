@@ -67,7 +67,7 @@
 
 #define EC_REG_SIZE 0x100
 #define EC_REG_CPU_TEMP 0x07
-#define EC_REG_GPU_TEMP 0xCD
+
 #define EC_REG_FAN_DUTY 0xCE
 #define EC_REG_FAN_RPMS_HI 0xD0
 #define EC_REG_FAN_RPMS_LO 0xD1
@@ -94,7 +94,6 @@ static void ec_on_sigterm(int signum);
 static int ec_init(void);
 static int ec_auto_duty_adjust(void);
 static int ec_query_cpu_temp(void);
-static int ec_query_gpu_temp(void);
 static int ec_query_fan_duty(void);
 static int ec_query_fan_rpms(void);
 static int ec_write_fan_duty(int duty_percentage);
@@ -160,7 +159,6 @@ static int menuitem_count = (sizeof(menuitems) / sizeof(menuitems[0]));
 struct {
     volatile int exit;
     volatile int cpu_temp;
-    volatile int gpu_temp;
     volatile int fan_duty;
     volatile int fan_rpms;
     volatile int auto_duty;
@@ -188,9 +186,7 @@ static int pid_enabled = 1;  // Enable PID control by default
 
 // Temperature tracking for rate of change calculation
 static int prev_cpu_temp = 0;
-static int prev_gpu_temp = 0;
 static double cpu_temp_rate = 0.0;  // °C per second
-static double gpu_temp_rate = 0.0;  // °C per second
 static time_t last_temp_update = 0;
 
 // Adaptive PID Controller variables
@@ -334,9 +330,8 @@ static void main_init_share(void) {
             -1, 0);
     share_info = shm;
     share_info->exit = 0;
-    share_info->cpu_temp = 0;
-    share_info->gpu_temp = 0;
-    share_info->fan_duty = 0;
+            share_info->cpu_temp = 0;
+        share_info->fan_duty = 0;
     share_info->fan_rpms = 0;
     share_info->auto_duty = 1;
     share_info->auto_duty_val = 0;
@@ -395,10 +390,9 @@ static int main_ec_worker(void) {
                     break;
                 case 0x100:
                     share_info->cpu_temp = buf[EC_REG_CPU_TEMP];
-                    share_info->gpu_temp = buf[EC_REG_GPU_TEMP];
                     share_info->fan_duty = calculate_fan_duty(buf[EC_REG_FAN_DUTY]);
                     share_info->fan_rpms = calculate_fan_rpms(buf[EC_REG_FAN_RPMS_HI], buf[EC_REG_FAN_RPMS_LO]);
-                    if (debug_mode) printf("[DEBUG] sysfs: cpu_temp=%d, gpu_temp=%d, fan_duty=%d, fan_rpms=%d\n", share_info->cpu_temp, share_info->gpu_temp, share_info->fan_duty, share_info->fan_rpms);
+                    if (debug_mode) printf("[DEBUG] sysfs: cpu_temp=%d, fan_duty=%d, fan_rpms=%d\n", share_info->cpu_temp, share_info->fan_duty, share_info->fan_rpms);
                     break;
                 default:
                     if (debug_mode) printf("[DEBUG] wrong EC size from sysfs: %ld\n", len);
@@ -411,10 +405,9 @@ static int main_ec_worker(void) {
         if (!sysfs_available) {
             if (debug_mode) printf("[DEBUG] Using direct I/O for EC access\n");
             share_info->cpu_temp = ec_query_cpu_temp();
-            share_info->gpu_temp = ec_query_gpu_temp();
             share_info->fan_duty = ec_query_fan_duty();
             share_info->fan_rpms = ec_query_fan_rpms();
-            if (debug_mode) printf("[DEBUG] direct I/O: cpu_temp=%d, gpu_temp=%d, fan_duty=%d, fan_rpms=%d\n", share_info->cpu_temp, share_info->gpu_temp, share_info->fan_duty, share_info->fan_rpms);
+            if (debug_mode) printf("[DEBUG] direct I/O: cpu_temp=%d, fan_duty=%d, fan_rpms=%d\n", share_info->cpu_temp, share_info->fan_duty, share_info->fan_rpms);
         }
         
         // auto EC
@@ -424,7 +417,7 @@ static int main_ec_worker(void) {
             if (next_duty != 0 && next_duty != share_info->auto_duty_val) {
                 char s_time[256];
                 get_time_string(s_time, 256, "%m/%d %H:%M:%S");
-                printf("%s CPU=%d°C, GPU=%d°C, auto fan duty to %d%%\n", s_time, share_info->cpu_temp, share_info->gpu_temp, next_duty);
+                printf("%s CPU=%d°C, auto fan duty to %d%%\n", s_time, share_info->cpu_temp, next_duty);
                 int write_result = ec_write_fan_duty(next_duty);
                 if (debug_mode) printf("[DEBUG] ec_write_fan_duty (auto) returned: %d\n", write_result);
                 share_info->auto_duty_val = next_duty;
@@ -475,7 +468,6 @@ static void main_ui_worker(int argc, char** argv) {
     printf("Clevo Fan Control Indicator Started\n");
     printf("Current Status:\n");
     printf("  CPU: %d°C\n", share_info->cpu_temp);
-    printf("  GPU: %d°C\n", share_info->gpu_temp);
     printf("  Fan: %d RPM (%d%% duty)\n", share_info->fan_rpms, share_info->fan_duty);
     printf("  Mode: %s\n", share_info->auto_duty ? "AUTO" : "MANUAL");
     printf("Press Ctrl+C to exit\n\n");
@@ -504,7 +496,7 @@ static int main_dump_fan(void) {
     printf("  FAN Duty: %d%%\n", ec_query_fan_duty());
     printf("  FAN RPMs: %d RPM\n", ec_query_fan_rpms());
     printf("  CPU Temp: %d°C\n", ec_query_cpu_temp());
-    printf("  GPU Temp: %d°C\n", ec_query_gpu_temp());
+
     return EXIT_SUCCESS;
 }
 
@@ -518,7 +510,7 @@ static int main_test_fan(int duty_percentage) {
 
 static gboolean ui_update(gpointer user_data) {
     char label[256];
-    sprintf(label, "%d℃ %d℃", share_info->cpu_temp, share_info->gpu_temp);
+            sprintf(label, "%d℃", share_info->cpu_temp);
     app_indicator_set_label(indicator, label, "XXXXXX");
     char icon_name[256];
     double load = ((double) share_info->fan_rpms) / MAX_FAN_RPM * 100.0;
@@ -537,8 +529,8 @@ static gboolean ui_update(gpointer user_data) {
         char time_str[20];
         strftime(time_str, sizeof(time_str), "%H:%M:%S", tm_info);
         
-        printf("[%s] CPU: %d°C, GPU: %d°C, Fan: %d RPM (%d%% duty), Mode: %s\n",
-               time_str, share_info->cpu_temp, share_info->gpu_temp, 
+        printf("[%s] CPU: %d°C, Fan: %d RPM (%d%% duty), Mode: %s\n",
+                               time_str, share_info->cpu_temp, 
                share_info->fan_rpms, share_info->fan_duty,
                share_info->auto_duty ? "AUTO" : "MANUAL");
     }
@@ -576,7 +568,7 @@ static void ui_command_show_temp(gchar* command) {
     // In indicator mode, we just print the current temperatures
     printf("Current Temperatures:\n");
     printf("  CPU: %d°C\n", ec_query_cpu_temp());
-    printf("  GPU: %d°C\n", ec_query_gpu_temp());
+
     printf("  Fan: %d RPM\n", ec_query_fan_rpms());
     printf("  Duty: %d%%\n", ec_query_fan_duty());
 }
@@ -612,7 +604,7 @@ static void ec_on_sigterm(int signum) {
 static int ec_auto_duty_adjust(void) {
     if (!pid_enabled) {
         // Fall back to simple control if PID is disabled
-        int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+        int temp = share_info->cpu_temp;
         int duty = share_info->fan_duty;
         int new_duty = duty;
 
@@ -632,7 +624,7 @@ static int ec_auto_duty_adjust(void) {
     }
 
     // PID Controller implementation
-    int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+    int temp = share_info->cpu_temp;
     double setpoint = (double)target_temperature;
     double process_variable = (double)temp;
     double error = process_variable - setpoint;
@@ -702,9 +694,7 @@ static int ec_query_cpu_temp(void) {
     return ec_io_read(EC_REG_CPU_TEMP);
 }
 
-static int ec_query_gpu_temp(void) {
-    return ec_io_read(EC_REG_GPU_TEMP);
-}
+
 
 static int ec_query_fan_duty(void) {
     int raw_duty = ec_io_read(EC_REG_FAN_DUTY);
@@ -1268,9 +1258,7 @@ static void pid_reset(void) {
     pid_prev_error = 0.0;
     // Reset temperature tracking
     prev_cpu_temp = 0;
-    prev_gpu_temp = 0;
     cpu_temp_rate = 0.0;
-    gpu_temp_rate = 0.0;
     last_temp_update = 0;
     // Reset adaptive PID if enabled
     if (adaptive_pid_enabled) {
@@ -1286,12 +1274,10 @@ static void calculate_temp_rate_of_change(void) {
         double time_diff = difftime(current_time, last_temp_update);
         if (time_diff > 0) {
             cpu_temp_rate = (double)(share_info->cpu_temp - prev_cpu_temp) / time_diff;
-            gpu_temp_rate = (double)(share_info->gpu_temp - prev_gpu_temp) / time_diff;
         }
     }
     
     prev_cpu_temp = share_info->cpu_temp;
-    prev_gpu_temp = share_info->gpu_temp;
     last_temp_update = current_time;
 }
 
@@ -1342,7 +1328,7 @@ static double adaptive_pid_calculate_oscillation(void) {
 }
 
 static double adaptive_pid_calculate_performance_score(void) {
-    int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+    int temp = share_info->cpu_temp;
     double error = fabs((double)temp - (double)target_temperature);
     double oscillation = adaptive_pid_calculate_oscillation();
     
@@ -1422,7 +1408,7 @@ static void adaptive_pid_tune_parameters(void) {
     
     // Adjust Ki (integral gain)
     double oscillation = adaptive_pid_calculate_oscillation();
-    int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+    int temp = share_info->cpu_temp;
     double error = fabs((double)temp - (double)target_temperature);
     
     if (oscillation > 3.0) {
@@ -1491,7 +1477,7 @@ static void adaptive_pid_reset(void) {
 }
 
 static bool adaptive_pid_detect_activity(void) {
-    int current_temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+    int current_temp = share_info->cpu_temp;
     int current_fan_duty = share_info->fan_duty;
     time_t current_time = time(NULL);
     
@@ -1620,7 +1606,6 @@ static void status_display_show_help(void) {
 static void status_display_update_with_control(void) {
     // Update shared memory with current values
     share_info->cpu_temp = ec_query_cpu_temp();
-    share_info->gpu_temp = ec_query_gpu_temp();
     share_info->fan_duty = ec_query_fan_duty();
     share_info->fan_rpms = ec_query_fan_rpms();
     
@@ -1633,7 +1618,7 @@ static void status_display_update_with_control(void) {
         if (next_duty != 0 && next_duty != share_info->auto_duty_val) {
             char s_time[256];
             get_time_string(s_time, 256, "%m/%d %H:%M:%S");
-            printf("%s CPU=%d°C, GPU=%d°C, auto fan duty to %d%%\n", s_time, share_info->cpu_temp, share_info->gpu_temp, next_duty);
+            printf("%s CPU=%d°C, auto fan duty to %d%%\n", s_time, share_info->cpu_temp, next_duty);
             printf("[DEBUG] Attempting to set fan duty to %d\n", next_duty);
             int write_result = ec_write_fan_duty(next_duty);
             printf("[DEBUG] ec_write_fan_duty returned: %d\n", write_result);
@@ -1659,18 +1644,12 @@ static void status_display_update_with_control(void) {
     // Temperature section with trends
     printf("\033[1mTemperatures:\033[0m\n");
     char* cpu_color = status_get_color_code(share_info->cpu_temp);
-    char* gpu_color = status_get_color_code(share_info->gpu_temp);
     char* cpu_trend_color = get_temp_trend_color(cpu_temp_rate);
-    char* gpu_trend_color = get_temp_trend_color(gpu_temp_rate);
     char* cpu_trend_symbol = get_temp_trend_symbol(cpu_temp_rate);
-    char* gpu_trend_symbol = get_temp_trend_symbol(gpu_temp_rate);
     
     printf("CPU: %s[%s] %s%d°C\033[0m %s%s%.1f°C/s\033[0m\n", 
            cpu_color, status_get_temp_bar(share_info->cpu_temp, 100), cpu_color, share_info->cpu_temp,
            cpu_trend_color, cpu_trend_symbol, cpu_temp_rate);
-    printf("GPU: %s[%s] %s%d°C\033[0m %s%s%.1f°C/s\033[0m\n", 
-           gpu_color, status_get_temp_bar(share_info->gpu_temp, 100), gpu_color, share_info->gpu_temp,
-           gpu_trend_color, gpu_trend_symbol, gpu_temp_rate);
     
     // Fan section
     printf("\n\033[1mFan Status:\033[0m\n");
@@ -1724,7 +1703,7 @@ static void status_display_update_with_control(void) {
             
             // Show PID error and components if in debug mode
             if (debug_mode) {
-                int temp = MAX(share_info->cpu_temp, share_info->gpu_temp);
+                int temp = share_info->cpu_temp;
                 double error = (double)temp - (double)target_temperature;
                 double proportional = pid_kp * error;
                 double integral = pid_ki * pid_integral;
@@ -1748,9 +1727,9 @@ static void status_display_update_with_control(void) {
     
     // Status indicators
     printf("\n\033[1mStatus:\033[0m\n");
-    if (share_info->cpu_temp > 80 || share_info->gpu_temp > 80) {
+    if (share_info->cpu_temp > 80) {
         printf("  \033[31m⚠ CRITICAL TEMPERATURE\033[0m\n");
-    } else if (share_info->cpu_temp > 70 || share_info->gpu_temp > 70) {
+    } else if (share_info->cpu_temp > 70) {
         printf("  \033[33m⚠ HIGH TEMPERATURE\033[0m\n");
     } else {
         printf("  \033[32m✓ Normal operation\033[0m\n");
@@ -1758,13 +1737,13 @@ static void status_display_update_with_control(void) {
     
     // Temperature trend summary
     printf("\n\033[1mTemperature Trends:\033[0m\n");
-    if (cpu_temp_rate > 2.0 || gpu_temp_rate > 2.0) {
+    if (cpu_temp_rate > 2.0) {
         printf("  \033[31m⚠ Rapid temperature increase\033[0m\n");
-    } else if (cpu_temp_rate > 0.5 || gpu_temp_rate > 0.5) {
+    } else if (cpu_temp_rate > 0.5) {
         printf("  \033[33m⚠ Temperature increasing\033[0m\n");
-    } else if (cpu_temp_rate < -2.0 || gpu_temp_rate < -2.0) {
+    } else if (cpu_temp_rate < -2.0) {
         printf("  \033[32m✓ Rapid cooling\033[0m\n");
-    } else if (cpu_temp_rate < -0.5 || gpu_temp_rate < -0.5) {
+    } else if (cpu_temp_rate < -0.5) {
         printf("  \033[36m✓ Cooling\033[0m\n");
     } else {
         printf("  \033[37m→ Temperature stable\033[0m\n");
