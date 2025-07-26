@@ -1,0 +1,152 @@
+# Makefile for Modular Clevo Fan Control Daemon
+# This version supports building the modular components separately
+
+CC = gcc
+CFLAGS = -Wall -Wextra -std=c99 -O2 -g
+LDFLAGS = -lncurses -lm
+
+# Source files for each module
+UTILS_SRCS = src/utils.c
+LOGGING_SRCS = src/logging.c
+CONFIG_SRCS = src/config.c
+EC_INTERFACE_SRCS = src/ec_interface.c
+TEMPERATURE_MONITOR_SRCS = src/temperature_monitor.c
+PID_CONTROLLER_SRCS = src/pid_controller.c
+FAN_HEALTH_SRCS = src/fan_health.c
+DAEMON_SRCS = src/daemon.c
+LIVE_STATS_SRCS = src/live_stats.c
+
+# All source files
+MODULAR_SRCS = src/main_new.c \
+               $(UTILS_SRCS) \
+               $(LOGGING_SRCS) \
+               $(CONFIG_SRCS) \
+               $(EC_INTERFACE_SRCS) \
+               $(TEMPERATURE_MONITOR_SRCS) \
+               $(PID_CONTROLLER_SRCS) \
+               $(FAN_HEALTH_SRCS) \
+               $(DAEMON_SRCS) \
+               $(LIVE_STATS_SRCS) \
+               src/clevo-daemon-socket.c \
+               src/privilege_manager.c
+
+# Object files
+MODULAR_OBJS = $(MODULAR_SRCS:.c=.o)
+
+# Header files
+HEADERS = src/utils.h \
+          src/logging.h \
+          src/config.h \
+          src/ec_interface.h \
+          src/temperature_monitor.h \
+          src/pid_controller.h \
+          src/fan_health.h \
+          src/daemon.h \
+          src/live_stats.h \
+          src/clevo-daemon-socket.h \
+          src/privilege_manager.h
+
+# Target executable
+TARGET = bin/clevo-daemon-modular
+
+# Default target
+all: $(TARGET)
+
+# Build the modular daemon
+$(TARGET): $(MODULAR_OBJS)
+	@mkdir -p bin
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "Built modular daemon: $@"
+
+# Compilation rules with dependencies
+src/main_new.o: src/main_new.c $(HEADERS)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/utils.o: src/utils.c src/utils.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/logging.o: src/logging.c src/logging.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/config.o: src/config.c src/config.h src/logging.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/ec_interface.o: src/ec_interface.c src/ec_interface.h src/logging.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/temperature_monitor.o: src/temperature_monitor.c src/temperature_monitor.h src/ec_interface.h src/logging.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/pid_controller.o: src/pid_controller.c src/pid_controller.h src/logging.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/fan_health.o: src/fan_health.c src/fan_health.h src/ec_interface.h src/logging.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/daemon.o: src/daemon.c src/daemon.h src/logging.h src/utils.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/live_stats.o: src/live_stats.c src/live_stats.h src/logging.h src/utils.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/clevo-daemon-socket.o: src/clevo-daemon-socket.c src/clevo-daemon-socket.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/privilege_manager.o: src/privilege_manager.c src/privilege_manager.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Clean target
+clean:
+	rm -f $(MODULAR_OBJS) $(TARGET)
+	rm -rf bin/
+
+# Install target
+install: $(TARGET)
+	@echo "Installing modular daemon..."
+	sudo cp $(TARGET) /usr/local/bin/clevo-daemon-modular
+	sudo chmod +s /usr/local/bin/clevo-daemon-modular
+	@echo "Installed as clevo-daemon-modular"
+
+# Uninstall target
+uninstall:
+	@echo "Uninstalling modular daemon..."
+	sudo rm -f /usr/local/bin/clevo-daemon-modular
+	@echo "Uninstalled clevo-daemon-modular"
+
+# Test target
+test: $(TARGET)
+	@echo "Testing modular daemon..."
+	@echo "Note: This requires root privileges for EC access"
+	sudo $(TARGET) --help
+
+# Debug target
+debug: CFLAGS += -DDEBUG -g3
+debug: $(TARGET)
+
+# Release target
+release: CFLAGS += -DNDEBUG -O3
+release: clean $(TARGET)
+
+# Show module dependencies
+deps:
+	@echo "Module Dependencies:"
+	@echo "main_new.c -> all modules"
+	@echo "utils.c -> (no dependencies)"
+	@echo "logging.c -> (no dependencies)"
+	@echo "config.c -> logging.h"
+	@echo "ec_interface.c -> logging.h"
+	@echo "temperature_monitor.c -> ec_interface.h, logging.h"
+	@echo "pid_controller.c -> logging.h"
+	@echo "fan_health.c -> ec_interface.h, logging.h"
+	@echo "daemon.c -> logging.h, utils.h"
+	@echo "live_stats.c -> logging.h, utils.h"
+
+# Show module sizes
+sizes: $(MODULAR_OBJS)
+	@echo "Module sizes:"
+	@for obj in $(MODULAR_OBJS); do \
+		size=$$(stat -c%s $$obj 2>/dev/null || stat -f%z $$obj 2>/dev/null); \
+		echo "  $$(basename $$obj .o): $$size bytes"; \
+	done
+
+.PHONY: all clean install uninstall test debug release deps sizes 
