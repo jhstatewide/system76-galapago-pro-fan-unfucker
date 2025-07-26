@@ -207,11 +207,13 @@ static int attempt_fan_recovery(void);
 
 // Alternative temperature reading functions
 static int read_temp_from_sysfs(const char* path);
+static int read_temp_from_coretemp(void);
 static int read_temp_from_hwmon(void);
 static int read_temp_from_thermal_zone(void);
 static int read_temp_from_acpi(void);
 static int get_alternative_cpu_temp(void);
 static bool validate_ec_temp_with_alternative(int ec_temp);
+static int get_cpu_temperature(void);
 
 // Adaptive PID Controller functions
 static void adaptive_pid_add_temp_history(int temp);
@@ -393,7 +395,7 @@ static int daemon_ec_worker(void) {
         if (debug_mode) daemon_log(LOG_DEBUG, "sysfs method not available, falling back to direct I/O");
     }
     
-    // Read EC data
+    // Read fan data from EC (we still need this for fan control)
     if (sysfs_available) {
         int io_fd = open("/sys/kernel/debug/ec/ec0/io", O_RDONLY, 0);
         if (io_fd < 0) {
@@ -410,14 +412,17 @@ static int daemon_ec_worker(void) {
                 sysfs_available = 0;
                 break;
             case 0x100:
-                // Validate and sanitize temperature readings
-                int raw_cpu_temp = buf[EC_REG_CPU_TEMP];
-                
-                share_info->cpu_temp = sanitize_temperature_reading(raw_cpu_temp, last_cpu_temp, "CPU");
-                
-                // Update last valid temperatures
-                if (share_info->cpu_temp == raw_cpu_temp) {
-                    last_cpu_temp = raw_cpu_temp;
+                // Use standard Linux temperature reading instead of EC
+                int cpu_temp = get_cpu_temperature();
+                if (cpu_temp > 0) {
+                    share_info->cpu_temp = cpu_temp;
+                } else {
+                    // Fall back to EC temperature if standard method fails
+                    int raw_cpu_temp = buf[EC_REG_CPU_TEMP];
+                    share_info->cpu_temp = sanitize_temperature_reading(raw_cpu_temp, last_cpu_temp, "CPU");
+                    if (share_info->cpu_temp == raw_cpu_temp) {
+                        last_cpu_temp = raw_cpu_temp;
+                    }
                 }
                 
                 share_info->fan_duty = calculate_fan_duty(buf[EC_REG_FAN_DUTY]);
@@ -436,14 +441,17 @@ static int daemon_ec_worker(void) {
     if (!sysfs_available) {
         if (debug_mode) daemon_log(LOG_DEBUG, "Using direct I/O for EC access");
         
-        // Validate and sanitize temperature readings
-        int raw_cpu_temp = ec_query_cpu_temp();
-        
-        share_info->cpu_temp = sanitize_temperature_reading(raw_cpu_temp, last_cpu_temp, "CPU");
-        
-        // Update last valid temperatures
-        if (share_info->cpu_temp == raw_cpu_temp) {
-            last_cpu_temp = raw_cpu_temp;
+        // Use standard Linux temperature reading instead of EC
+        int cpu_temp = get_cpu_temperature();
+        if (cpu_temp > 0) {
+            share_info->cpu_temp = cpu_temp;
+        } else {
+            // Fall back to EC temperature if standard method fails
+            int raw_cpu_temp = ec_query_cpu_temp();
+            share_info->cpu_temp = sanitize_temperature_reading(raw_cpu_temp, last_cpu_temp, "CPU");
+            if (share_info->cpu_temp == raw_cpu_temp) {
+                last_cpu_temp = raw_cpu_temp;
+            }
         }
         
         share_info->fan_duty = ec_query_fan_duty();
@@ -1674,6 +1682,30 @@ static int read_temp_from_sysfs(const char* path) {
     return temp;
 }
 
+static int read_temp_from_coretemp(void) {
+    // Read from coretemp sensors (most reliable for CPU temperature)
+    const char* coretemp_paths[] = {
+        "/sys/class/hwmon/hwmon3/temp1_input",  // Package
+        "/sys/class/hwmon/hwmon3/temp2_input",  // Core 0
+        "/sys/class/hwmon/hwmon3/temp3_input",  // Core 1
+        "/sys/class/hwmon/hwmon3/temp4_input",  // Core 2
+        "/sys/class/hwmon/hwmon3/temp5_input",  // Core 3
+        NULL
+    };
+    
+    int max_temp = -1;
+    for (int i = 0; coretemp_paths[i] != NULL; i++) {
+        int temp = read_temp_from_sysfs(coretemp_paths[i]);
+        if (temp > 0 && temp < 120) {
+            if (temp > max_temp) {
+                max_temp = temp;
+            }
+        }
+    }
+    
+    return max_temp;
+}
+
 static int read_temp_from_hwmon(void) {
     // Try common hwmon paths
     const char* hwmon_paths[] = {
@@ -1742,8 +1774,12 @@ static int read_temp_from_acpi(void) {
 }
 
 static int get_alternative_cpu_temp(void) {
-    // Try multiple sources in order of preference
-    int temp = read_temp_from_hwmon();
+    // Try coretemp first (most reliable)
+    int temp = read_temp_from_coretemp();
+    if (temp > 0) return temp;
+    
+    // Fall back to other sources
+    temp = read_temp_from_hwmon();
     if (temp > 0) return temp;
     
     temp = read_temp_from_thermal_zone();
@@ -1755,8 +1791,50 @@ static int get_alternative_cpu_temp(void) {
     return -1;
 }
 
+// New function to get CPU temperature using standard Linux methods
+static int get_cpu_temperature(void) {
+    // Try coretemp first (most reliable for CPU temperature)
+    int temp = read_temp_from_coretemp();
+    if (temp > 0) {
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "Using coretemp sensor: %d°C", temp);
+        }
+        return temp;
+    }
+    
+    // Fall back to other hwmon sources
+    temp = read_temp_from_hwmon();
+    if (temp > 0) {
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "Using hwmon sensor: %d°C", temp);
+        }
+        return temp;
+    }
+    
+    // Fall back to thermal zones
+    temp = read_temp_from_thermal_zone();
+    if (temp > 0) {
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "Using thermal zone sensor: %d°C", temp);
+        }
+        return temp;
+    }
+    
+    // Last resort: ACPI
+    temp = read_temp_from_acpi();
+    if (temp > 0) {
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "Using ACPI sensor: %d°C", temp);
+        }
+        return temp;
+    }
+    
+    // If all else fails, return -1
+    daemon_log(LOG_WARNING, "No standard temperature sensors found");
+    return -1;
+}
+
 static bool validate_ec_temp_with_alternative(int ec_temp) {
-    static int last_alt_temp = -1;
     static int validation_failures = 0;
     
     int alt_temp = get_alternative_cpu_temp();
