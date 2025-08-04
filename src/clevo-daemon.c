@@ -43,6 +43,7 @@
 
 #include "privilege_manager.h"
 #include "clevo-daemon-socket.h"
+#include "fan_constants.h"
 
 #define NAME "clevo-daemon"
 
@@ -65,19 +66,19 @@
 #define EC_REG_FAN_RPMS_HI 0xD0
 #define EC_REG_FAN_RPMS_LO 0xD1
 
-#define MAX_FAN_RPM 4400.0
+#define MAX_FAN_RPM FAN_MAX_RPM
 
 // Define MAX macro if not defined
 #ifndef MAX
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
 #endif
 
-// Fan safety thresholds
-#define MIN_FAN_DUTY 15        // Minimum fan duty cycle (%) - reduced from 35%
-#define MIN_FAN_RPM 500        // Absolute minimum fan RPM before emergency measures
-#define SAFE_FAN_RPM 1000      // Safe minimum fan RPM for normal operation
-#define RPM_DUTY_RATIO 40      // Expected minimum RPM per 1% duty cycle
-#define EMERGENCY_DUTY 60      // Emergency duty cycle when RPM drops too low
+// Fan safety thresholds - now using project-wide constants from fan_constants.h
+#define MIN_FAN_DUTY FAN_MIN_DUTY
+#define MIN_FAN_RPM FAN_MIN_RPM
+#define SAFE_FAN_RPM FAN_SAFE_RPM
+#define RPM_DUTY_RATIO FAN_RPM_DUTY_RATIO
+#define EMERGENCY_DUTY FAN_EMERGENCY_DUTY
 
 // Global variables
 static int debug_mode = 0;
@@ -826,6 +827,15 @@ static int ec_auto_duty_adjust(void) {
     if (new_duty > 100) new_duty = 100;
     if (new_duty < MIN_FAN_DUTY) new_duty = MIN_FAN_DUTY;  // Never go below minimum duty
     
+    // CRITICAL: Ensure duty cycle will result in RPM above minimum threshold
+    // Calculate the minimum duty needed to achieve FAN_MIN_RPM
+    int min_duty_for_min_rpm = (FAN_MIN_RPM + FAN_RPM_DUTY_RATIO - 1) / FAN_RPM_DUTY_RATIO; // Ceiling division
+    if (new_duty < min_duty_for_min_rpm) {
+        daemon_log(LOG_WARNING, "Preventing fan stall: duty=%d%% would result in RPM below minimum (%d), setting to %d%%", 
+                  new_duty, FAN_MIN_RPM, min_duty_for_min_rpm);
+        new_duty = min_duty_for_min_rpm;
+    }
+    
     // Check if fan is potentially stuck
     int current_rpms = share_info->fan_rpms;
     int expected_min_rpm = new_duty * RPM_DUTY_RATIO;
@@ -1571,7 +1581,7 @@ static int get_aggressive_duty_for_error(int temp_error) {
     } else if (temp_error >= 3) {
         return 75;  // Moderate: 75% duty for 3-4°C error
     } else if (temp_error >= 1) {
-        return 60;  // Low: 60% duty for 1-2°C error
+        return FAN_EMERGENCY_DUTY;  // Low: emergency duty for 1-2°C error
     } else {
         return 0;   // No escalation needed
     }

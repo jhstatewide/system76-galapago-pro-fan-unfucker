@@ -30,6 +30,7 @@
 #include "live_stats.h"
 #include "clevo-daemon-socket.h"
 #include "privilege_manager.h"
+#include "fan_constants.h"
 
 // Global module instances
 static clevo_config_t* config = NULL;

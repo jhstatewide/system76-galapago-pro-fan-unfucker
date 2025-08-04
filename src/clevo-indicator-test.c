@@ -47,6 +47,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <time.h>
+#include "fan_constants.h"
 
 #ifndef TEST_MODE
 #include <libayatana-appindicator/app-indicator.h>
@@ -74,7 +75,7 @@
 #define EC_REG_FAN_RPMS_HI 0xD0
 #define EC_REG_FAN_RPMS_LO 0xD1
 
-#define MAX_FAN_RPM 4400.0
+#define MAX_FAN_RPM FAN_MAX_RPM
 
 // Define MAX macro if not defined
 #ifndef MAX

@@ -49,6 +49,7 @@
 
 #include <libayatana-appindicator/app-indicator.h>
 #include "privilege_manager.h"
+#include "fan_constants.h"
 
 #define NAME "clevo-indicator"
 
@@ -72,7 +73,7 @@
 #define EC_REG_FAN_RPMS_HI 0xD0
 #define EC_REG_FAN_RPMS_LO 0xD1
 
-#define MAX_FAN_RPM 4400.0
+#define MAX_FAN_RPM FAN_MAX_RPM
 
 typedef enum {
     NA = 0, AUTO = 1, MANUAL = 2
@@ -1654,7 +1655,7 @@ static void status_display_update_with_control(void) {
     // Fan section
     printf("\n\033[1mFan Status:\033[0m\n");
     printf("Duty: %d%%\n", share_info->fan_duty);
-    printf("RPM:  [%s] %d RPM\n", status_get_fan_bar(share_info->fan_rpms, 4400), share_info->fan_rpms);
+            printf("RPM:  [%s] %d RPM\n", status_get_fan_bar(share_info->fan_rpms, FAN_MAX_RPM), share_info->fan_rpms);
     
     // Mode indicator with enhanced PID info
     printf("\n\033[1mControl Mode:\033[0m ");

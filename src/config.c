@@ -1,5 +1,6 @@
 #include "config.h"
 #include "logging.h"
+#include "fan_constants.h"
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,10 +41,10 @@ clevo_config_t* config_init(void) {
     config->live_stats_mode = 0;
     config->live_stats_interval = 0.1;
     
-    config->min_fan_duty = 15;
-    config->min_fan_rpm = 500;
-    config->safe_fan_rpm = 1000;
-    config->emergency_duty = 60;
+    config->min_fan_duty = FAN_MIN_DUTY;
+    config->min_fan_rpm = FAN_MIN_RPM;
+    config->safe_fan_rpm = FAN_SAFE_RPM;
+    config->emergency_duty = FAN_EMERGENCY_DUTY;
     
     return config;
 }

@@ -2,6 +2,7 @@
 #define EC_INTERFACE_H
 
 #include <stdint.h>
+#include "fan_constants.h"
 
 // EC register definitions
 #define EC_SC 0x66
@@ -14,7 +15,7 @@
 #define EC_REG_FAN_DUTY 0xCE
 #define EC_REG_FAN_RPMS_HI 0xD0
 #define EC_REG_FAN_RPMS_LO 0xD1
-#define MAX_FAN_RPM 4400.0
+#define MAX_FAN_RPM FAN_MAX_RPM
 
 /**
  * Initialize EC interface

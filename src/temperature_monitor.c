@@ -1,6 +1,7 @@
 #include "temperature_monitor.h"
 #include "ec_interface.h"
 #include "logging.h"
+#include "fan_constants.h"
 #include <fcntl.h>
 #include <math.h>
 #include <stdio.h>
@@ -141,7 +142,10 @@ int temperature_monitor_sanitize_reading(temperature_monitor_t* monitor,
         // Try to "reset" the EC by cycling fan speeds
         ec_write_fan_duty(100); // Full speed
         usleep(500000);         // Wait 500ms
-        ec_write_fan_duty(30);  // Low speed
+        
+        // Use minimum duty that ensures minimum RPM
+        int min_duty_for_min_rpm = (FAN_MIN_RPM + FAN_RPM_DUTY_RATIO - 1) / FAN_RPM_DUTY_RATIO; // Ceiling division
+        ec_write_fan_duty(min_duty_for_min_rpm);  // Low speed but above minimum RPM
         usleep(500000);         // Wait 500ms
         
         // Re-read temperature after reset attempt

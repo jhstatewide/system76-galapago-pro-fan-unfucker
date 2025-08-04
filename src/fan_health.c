@@ -1,6 +1,7 @@
 #include "fan_health.h"
 #include "ec_interface.h"
 #include "logging.h"
+#include "fan_constants.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,7 +70,14 @@ int fan_health_check(fan_health_monitor_t* monitor, int current_duty, int curren
             
             // Increase duty cycle by 10% or to minimum safe duty
             int new_duty = (current_duty + 10 > 100) ? 100 : current_duty + 10;
-            if (new_duty < 15) new_duty = 15; // Minimum 15% duty
+            
+            // CRITICAL: Ensure duty cycle will result in RPM above minimum threshold
+            int min_duty_for_min_rpm = (FAN_MIN_RPM + FAN_RPM_DUTY_RATIO - 1) / FAN_RPM_DUTY_RATIO; // Ceiling division
+            if (new_duty < min_duty_for_min_rpm) {
+                logging_warning("Preventing fan stall: duty=%d%% would result in RPM below minimum (%d), setting to %d%%", 
+                              new_duty, FAN_MIN_RPM, min_duty_for_min_rpm);
+                new_duty = min_duty_for_min_rpm;
+            }
             ec_write_fan_duty(new_duty);
             logging_info("Increasing fan duty to %d%% to maintain safe RPM", new_duty);
             

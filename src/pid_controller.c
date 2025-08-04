@@ -1,5 +1,6 @@
 #include "pid_controller.h"
 #include "logging.h"
+#include "fan_constants.h"
 #include <math.h>
 #include <stdlib.h>
 
@@ -57,12 +58,12 @@ pid_controller_t* pid_controller_init(double kp, double ki, double kd,
     pid->max_duty_increase_rate = max_increase_rate;
     pid->max_duty_decrease_rate = max_decrease_rate;
     
-    // Initialize safety thresholds
+    // Initialize safety thresholds using project-wide constants
     pid->min_fan_duty = min_fan_duty;
-    pid->min_fan_rpm = 500;
-    pid->safe_fan_rpm = 1000;
-    pid->emergency_duty = 60;
-    pid->rpm_duty_ratio = 40;
+    pid->min_fan_rpm = FAN_MIN_RPM;
+    pid->safe_fan_rpm = FAN_SAFE_RPM;
+    pid->emergency_duty = FAN_EMERGENCY_DUTY;
+    pid->rpm_duty_ratio = FAN_RPM_DUTY_RATIO;
     
     // Initialize temperature history
     for (int i = 0; i < 10; i++) {
@@ -315,6 +316,14 @@ int pid_controller_calculate_duty(pid_controller_t* pid, int current_temp, int t
     if (new_duty > 100) new_duty = 100;
     if (new_duty < pid->min_fan_duty) new_duty = pid->min_fan_duty;  // Never go below minimum duty
     
+    // CRITICAL: Ensure duty cycle will result in RPM above minimum threshold
+    int min_duty_for_min_rpm = (FAN_MIN_RPM + FAN_RPM_DUTY_RATIO - 1) / FAN_RPM_DUTY_RATIO; // Ceiling division
+    if (new_duty < min_duty_for_min_rpm) {
+        logging_warning("Preventing fan stall: duty=%d%% would result in RPM below minimum (%d), setting to %d%%", 
+                      new_duty, FAN_MIN_RPM, min_duty_for_min_rpm);
+        new_duty = min_duty_for_min_rpm;
+    }
+    
     // Check if fan is potentially stuck
     int expected_min_rpm = new_duty * pid->rpm_duty_ratio;
     
@@ -323,8 +332,8 @@ int pid_controller_calculate_duty(pid_controller_t* pid, int current_temp, int t
                       current_rpm, expected_min_rpm, new_duty);
         
         // Attempt recovery by temporarily boosting fan speed
-        new_duty = (new_duty + 20 > 100) ? 100 : new_duty + 20;  // Boost by 20% or to at least 60%
-        if (new_duty < 60) new_duty = 60;
+        new_duty = (new_duty + 20 > 100) ? 100 : new_duty + 20;  // Boost by 20% or to at least emergency duty
+        if (new_duty < FAN_EMERGENCY_DUTY) new_duty = FAN_EMERGENCY_DUTY;
         logging_info("Attempting fan recovery by setting duty to %d%%", new_duty);
     }
     
@@ -407,7 +416,7 @@ int pid_controller_get_aggressive_duty_for_error(pid_controller_t* pid, int temp
     } else if (temp_error >= 3) {
         return 75;  // Moderate: 75% duty for 3-4°C error
     } else if (temp_error >= 1) {
-        return 60;  // Low: 60% duty for 1-2°C error
+        return FAN_EMERGENCY_DUTY;  // Low: emergency duty for 1-2°C error
     } else {
         return 0;   // No escalation needed
     }
