@@ -13,6 +13,9 @@
 #include <QColor>
 #include <QPoint>
 
+// Forward declaration
+class ClevoSettingsDialog;
+
 class ClevoMonitor : public QWidget
 {
     Q_OBJECT
@@ -34,6 +37,7 @@ private slots:
     void showContextMenu();
     void quitApplication();
     void reconnectToDaemon();
+    void openSettings();
 
 private:
     // Window properties
@@ -64,6 +68,7 @@ private:
     QTimer *updateTimer;
     QSocketNotifier *socketNotifier;
     QMenu *contextMenu;
+    ClevoSettingsDialog *settingsDialog;
     
     // Socket
     int daemonSocket;

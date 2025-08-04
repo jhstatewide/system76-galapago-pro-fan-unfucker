@@ -13,6 +13,7 @@ set(SOURCES
     src/gui_display.cpp
     src/gui_config.cpp
     src/gui_socket.cpp
+    src/clevo-settings.cpp
 )
 
 set(HEADERS
@@ -20,6 +21,7 @@ set(HEADERS
     src/gui_display.h
     src/gui_config.h
     src/gui_socket.h
+    src/clevo-settings.h
 )
 
 # Create executable

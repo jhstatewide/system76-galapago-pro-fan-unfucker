@@ -1,4 +1,5 @@
 #include "clevo-gui.h"
+#include "clevo-settings.h"
 #include <QApplication>
 #include <QKeyEvent>
 #include <QMessageBox>
@@ -17,6 +18,7 @@ ClevoMonitor::ClevoMonitor(QWidget *parent)
     , updateTimer(nullptr)
     , socketNotifier(nullptr)
     , contextMenu(nullptr)
+    , settingsDialog(nullptr)
     , daemonSocket(-1)
     , socketConnected(false)
     , cpuTemp(0)
@@ -83,6 +85,12 @@ void ClevoMonitor::setupContextMenu()
     QAction *transparencyAction = new QAction("Toggle Transparency", this);
     connect(transparencyAction, &QAction::triggered, this, &ClevoMonitor::toggleTransparency);
     contextMenu->addAction(transparencyAction);
+    
+    contextMenu->addSeparator();
+    
+    QAction *settingsAction = new QAction("Settings and Commands", this);
+    connect(settingsAction, &QAction::triggered, this, &ClevoMonitor::openSettings);
+    contextMenu->addAction(settingsAction);
     
     contextMenu->addSeparator();
     
@@ -396,6 +404,16 @@ void ClevoMonitor::reconnectToDaemon()
 {
     connectToDaemon();
     updateStatus();
+}
+
+void ClevoMonitor::openSettings()
+{
+    if (!settingsDialog) {
+        settingsDialog = new ClevoSettingsDialog(this);
+    }
+    settingsDialog->show();
+    settingsDialog->raise();
+    settingsDialog->activateWindow();
 }
 
 int main(int argc, char *argv[])
