@@ -69,9 +69,12 @@
 
 #define MAX_FAN_RPM FAN_MAX_RPM
 
-// Define MAX macro if not defined
+// Define MAX and MIN macros if not defined
 #ifndef MAX
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
+#endif
+#ifndef MIN
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
 #endif
 
 // Fan safety thresholds - now using project-wide constants from fan_constants.h
@@ -92,6 +95,10 @@ static volatile int running = 1;
 int max_duty_change_rate = 15;  // Default max duty change per cycle (%)
 int max_duty_increase_rate = 10;  // Default max increase per cycle (%)
 int max_duty_decrease_rate = 30;  // Default max decrease per cycle (%)
+
+// Fan bearing protection variables
+static time_t last_duty_change_time = 0;
+static int last_duty_change_value = 0;
 
 // Live stats mode variables
 static int live_stats_mode = 0;
@@ -948,9 +955,31 @@ static int ec_auto_duty_adjust(void) {
         daemon_log(LOG_WARNING, "Fan may be stuck: RPM=%d (expected >%d) at duty=%d%%", 
                   current_rpms, expected_min_rpm, new_duty);
         
-        // Attempt recovery by temporarily boosting fan speed
-        new_duty = MAX(new_duty + 20, 60);  // Boost by 20% or to at least 60%
+        // Attempt recovery by temporarily boosting fan speed - STAY WITHIN VALID RANGE
+        int recovery_duty = MAX(new_duty + 20, FAN_EMERGENCY_DUTY);
+        new_duty = MIN(recovery_duty, 100);  // Never exceed 100%
         daemon_log(LOG_INFO, "Attempting fan recovery by setting duty to %d%%", new_duty);
+    }
+    
+    // CRITICAL TEMPERATURE PROTECTION
+    if (temp >= FAN_EMERGENCY_SHUTDOWN_TEMP) {
+        daemon_log(LOG_CRIT, "EMERGENCY: Temperature %d°C exceeds shutdown threshold %d°C - forcing 100%% duty", 
+                  temp, FAN_EMERGENCY_SHUTDOWN_TEMP);
+        new_duty = 100; // Force maximum cooling
+    } else if (temp >= FAN_CRITICAL_TEMP_THRESHOLD) {
+        daemon_log(LOG_ERR, "CRITICAL: Temperature %d°C exceeds critical threshold %d°C - ensuring adequate cooling", 
+                  temp, FAN_CRITICAL_TEMP_THRESHOLD);
+        new_duty = MAX(new_duty, 80); // Ensure at least 80% duty for critical temps
+    }
+    
+    // FINAL VALIDATION: Ensure duty cycle is always within spec range
+    if (new_duty < MIN_FAN_DUTY) {
+        daemon_log(LOG_WARNING, "Duty cycle %d%% below minimum %d%%, adjusting", new_duty, MIN_FAN_DUTY);
+        new_duty = MIN_FAN_DUTY;
+    }
+    if (new_duty > 100) {
+        daemon_log(LOG_WARNING, "Duty cycle %d%% above maximum 100%%, capping", new_duty);
+        new_duty = 100;
     }
     
     if (debug_mode) {
@@ -977,31 +1006,80 @@ static int ec_query_fan_rpms(void) {
 }
 
 static int ec_write_fan_duty(int duty_percentage) {
-    // Enforce minimum duty cycle
+    // Enforce minimum duty cycle with stall prevention
     if (duty_percentage < MIN_FAN_DUTY) {
         daemon_log(LOG_INFO, "Adjusting fan duty to minimum: %d%% -> %d%%", duty_percentage, MIN_FAN_DUTY);
         duty_percentage = MIN_FAN_DUTY;
+    }
+    
+    // Additional stall prevention for very low duty cycles
+    if (duty_percentage < FAN_STALL_PREVENTION_DUTY) {
+        daemon_log(LOG_WARNING, "Duty cycle %d%% below stall prevention threshold, adjusting to %d%%", 
+                  duty_percentage, FAN_STALL_PREVENTION_DUTY);
+        duty_percentage = FAN_STALL_PREVENTION_DUTY;
     }
     
     if (duty_percentage < 1 || duty_percentage > 100) {
         daemon_log(LOG_ERR, "Wrong fan duty to write: %d", duty_percentage);
         return EXIT_FAILURE;
     }
+    
+    // Fan bearing protection: Prevent rapid duty cycling
+    time_t current_time = time(NULL);
+    if (current_time - last_duty_change_time < FAN_CYCLING_COOLDOWN_MS / 1000) {
+        if (abs(duty_percentage - last_duty_change_value) < 5) {
+            // Small change within cooldown period - skip to protect bearings
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Skipping small duty change %d%% -> %d%% to protect fan bearings", 
+                          last_duty_change_value, duty_percentage);
+            }
+            return EXIT_SUCCESS;
+        }
+    }
+    
+    // Record current RPM before change for response validation
+    int rpm_before = ec_query_fan_rpms();
+    
     double v_d = ((double) duty_percentage) / 100.0 * 255.0;
     int v_i = (int) v_d;
-    return ec_io_do(0x99, 0x01, v_i);
+    int result = ec_io_do(0x99, 0x01, v_i);
+    
+    // Update bearing protection variables on successful write
+    if (result == EXIT_SUCCESS) {
+        last_duty_change_time = current_time;
+        last_duty_change_value = duty_percentage;
+    }
+    
+    // Validate fan response after a short delay
+    if (result == EXIT_SUCCESS) {
+        usleep(50000); // Wait 50ms for fan to respond
+        int rpm_after = ec_query_fan_rpms();
+        
+        // Check if fan responded appropriately
+        if (rpm_after > 0 && rpm_after >= rpm_before * 0.8) { // Allow 20% tolerance
+            if (debug_mode) {
+                daemon_log(LOG_DEBUG, "Fan responded: RPM %d -> %d at duty %d%%", rpm_before, rpm_after, duty_percentage);
+            }
+        } else {
+            daemon_log(LOG_WARNING, "Fan may not have responded: RPM %d -> %d at duty %d%%", rpm_before, rpm_after, duty_percentage);
+        }
+    }
+    
+    return result;
 }
 
 static int ec_io_wait(const uint32_t port, const uint32_t flag, const char value) {
     uint8_t data = inb(port);
     int i = 0;
-    while ((((data >> flag) & 0x1) != value) && (i++ < 100)) {
+    int max_wait = FAN_RESPONSE_TIMEOUT_MS; // Use configurable timeout
+    
+    while ((((data >> flag) & 0x1) != value) && (i++ < max_wait)) {
         usleep(1000);
         data = inb(port);
     }
-    if (i >= 100) {
-        daemon_log(LOG_ERR, "wait_ec error on port 0x%x, data=0x%x, flag=0x%x, value=0x%x",
-                port, data, flag, value);
+    if (i >= max_wait) {
+        daemon_log(LOG_ERR, "EC communication timeout on port 0x%x, data=0x%x, flag=0x%x, value=0x%x (waited %dms)",
+                port, data, flag, value, max_wait);
         return EXIT_FAILURE;
     }
     return EXIT_SUCCESS;
@@ -1482,8 +1560,9 @@ static void check_fan_health(void) {
             daemon_log(LOG_WARNING, "Low fan RPM detected: %d RPM at %d%% duty", 
                       current_rpm, current_duty);
             
-            // Increase duty cycle by 10% or to minimum safe duty
+            // Increase duty cycle by 10% or to minimum safe duty - STAY WITHIN VALID RANGE
             int new_duty = MAX(current_duty + 10, MIN_FAN_DUTY);
+            new_duty = MIN(new_duty, 100);  // Never exceed 100%
             ec_write_fan_duty(new_duty);
             daemon_log(LOG_INFO, "Increasing fan duty to %d%% to maintain safe RPM", new_duty);
             

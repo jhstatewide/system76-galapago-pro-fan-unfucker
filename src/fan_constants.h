@@ -11,4 +11,11 @@
 // Maximum fan RPM for this laptop model
 #define FAN_MAX_RPM 4400
 
+// Fan control best practices constants
+#define FAN_STALL_PREVENTION_DUTY 25    // Minimum duty to prevent fan stall
+#define FAN_RESPONSE_TIMEOUT_MS 200     // Time to wait for fan response (ms)
+#define FAN_CYCLING_COOLDOWN_MS 1000   // Minimum time between duty changes (ms)
+#define FAN_CRITICAL_TEMP_THRESHOLD 95  // Critical temperature threshold (°C)
+#define FAN_EMERGENCY_SHUTDOWN_TEMP 105 // Emergency shutdown temperature (°C)
+
 #endif // FAN_CONSTANTS_H 
