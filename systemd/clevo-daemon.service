@@ -4,10 +4,10 @@ After=multi-user.target
 Wants=multi-user.target
 
 [Service]
-Type=forking
+Type=simple
 User=root
 Group=root
-ExecStart=/usr/local/bin/clevo-daemon --target-temp 50 --adaptive-pid 1 --max-increase-rate 10 --max-decrease-rate 20 --quiet
+ExecStart=/usr/local/bin/clevo-daemon --target 65 --foreground
 Restart=on-failure
 RestartSec=5
 
