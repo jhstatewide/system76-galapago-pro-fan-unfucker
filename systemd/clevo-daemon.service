@@ -1,15 +1,20 @@
 [Unit]
 Description=Galago Pro Fan Control Daemon
-After=multi-user.target
+After=multi-user.target dbus.service
 Wants=multi-user.target
+Requires=dbus.service
 
 [Service]
 Type=simple
 User=root
 Group=root
-ExecStart=/usr/local/bin/clevo-daemon --target 65 --foreground
+ExecStart=/usr/local/bin/clevo-daemon --target 65
 Restart=on-failure
 RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=5
+KillMode=mixed
+KillSignal=SIGTERM
 
 # Low CPU priority
 Nice=19

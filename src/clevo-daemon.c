@@ -45,6 +45,7 @@
 #include "clevo-daemon-socket.h"
 #include "clevo-daemon-dbus.h"
 #include "fan_constants.h"
+#include "logging.h"
 
 #define NAME "clevo-daemon"
 
@@ -251,6 +252,12 @@ static void live_stats_handle_input(void);
 int main(int argc, char* argv[]) {
     printf("Clevo Fan Control Daemon\n");
     
+    // Initialize logging system
+    if (logging_init("clevo-daemon", debug_mode ? LOG_DEBUG : LOG_INFO, 0) != 0) {
+        printf("Failed to initialize logging system\n");
+        return EXIT_FAILURE;
+    }
+    
     // Parse command line arguments
     parse_command_line(argc, argv);
     
@@ -272,13 +279,15 @@ int main(int argc, char* argv[]) {
     }
     
     // Test EC access
+    daemon_log(LOG_INFO, "Initializing EC interface...");
     if (ec_init() != EXIT_SUCCESS) {
-        printf("unable to control EC: %s\n", strerror(errno));
+        daemon_log(LOG_ERR, "Unable to control EC: %s", strerror(errno));
         if (live_stats_mode) {
             live_stats_cleanup();
         }
         return EXIT_FAILURE;
     }
+    daemon_log(LOG_INFO, "EC interface initialized successfully");
     
     // Check for remaining arguments after option processing
     int fan_duty_arg = -1;
@@ -292,10 +301,9 @@ int main(int argc, char* argv[]) {
         signal_term(&daemon_on_sigterm);
         daemon_init_share();
         
-        // Daemonize if not in debug mode AND not in live stats mode AND not in foreground mode
-        if (!debug_mode && !live_stats_mode && !foreground_mode) {
-            daemonize();
-        }
+        // For now, disable daemonization entirely to fix systemd issues
+        // TODO: Re-enable daemonization for non-systemd usage
+        daemon_log(LOG_INFO, "Running in foreground mode (daemonization disabled)");
         
         // Initialize socket server
         if (init_socket_server() != 0) {
@@ -446,14 +454,19 @@ int main(int argc, char* argv[]) {
                 broadcast_status_update(share_info->cpu_temp, share_info->fan_duty, 
                                      share_info->fan_rpms, share_info->auto_duty);
                 
-                // Use shorter sleep intervals to check for signals more frequently
+                // Use much shorter sleep intervals to check for signals more frequently
                 int sleep_us = (int)(status_interval * 1000000);
-                int check_interval = 100000; // Check every 0.1 seconds
+                int check_interval = 50000; // Check every 0.05 seconds for faster shutdown
                 
                 while (sleep_us > 0 && running) {
                     int sleep_chunk = (sleep_us > check_interval) ? check_interval : sleep_us;
                     usleep(sleep_chunk);
                     sleep_us -= sleep_chunk;
+                    
+                    // Additional check for immediate shutdown
+                    if (!running) {
+                        break;
+                    }
                 }
             }
             
@@ -476,6 +489,9 @@ int main(int argc, char* argv[]) {
     if (live_stats_mode) {
         live_stats_cleanup();
     }
+    
+    // Clean up logging
+    logging_cleanup();
     
     return EXIT_SUCCESS;
 }
@@ -623,22 +639,18 @@ static int daemon_test_fan(int duty_percentage) {
 }
 
 static void daemon_on_sigterm(int signum) {
-    daemon_log(LOG_INFO, "Received signal %s, shutting down immediately", strsignal(signum));
+    // Write directly to stderr for immediate output
+    fprintf(stderr, "SIGNAL_HANDLER: Received signal %s, shutting down immediately\n", strsignal(signum));
+    fflush(stderr);
+    
+    // Set shutdown flag for main loop
     running = 0;
     if (share_info != NULL) {
         share_info->exit = 1;
     }
     
-    // Clean up live stats if enabled
-    if (live_stats_mode) {
-        live_stats_cleanup();
-    }
-    
-    // Stop socket server immediately
-    stop_socket_server();
-    
-    // Force immediate exit to avoid waiting for sleep
-    exit(EXIT_SUCCESS);
+    // Force immediate exit - minimal cleanup to avoid blocking
+    _exit(EXIT_SUCCESS);
 }
 
 
@@ -1585,7 +1597,15 @@ static int attempt_fan_recovery(void) {
     
     // First try: Full speed to kick-start
     ec_write_fan_duty(100);
-    usleep(1000000);  // Wait 1 second at full speed
+    
+    // Wait 1 second at full speed, but check for shutdown every 100ms
+    for (int i = 0; i < 10; i++) {
+        if (!running) {
+            daemon_log(LOG_INFO, "Shutdown requested during fan recovery - aborting");
+            return EXIT_FAILURE;
+        }
+        usleep(100000);  // 100ms chunks
+    }
     
     int rpm = ec_query_fan_rpms();
     if (rpm > SAFE_FAN_RPM) {
@@ -1598,12 +1618,25 @@ static int attempt_fan_recovery(void) {
     int num_duties = sizeof(recovery_duties) / sizeof(recovery_duties[0]);
     
     for (int i = 0; i < num_duties; i++) {
+        if (!running) {
+            daemon_log(LOG_INFO, "Shutdown requested during fan recovery - aborting");
+            return EXIT_FAILURE;
+        }
+        
         int duty = recovery_duties[i];
         daemon_log(LOG_INFO, "Recovery step %d/%d: Setting fan to %d%%", 
                   i + 1, num_duties, duty);
         
         ec_write_fan_duty(duty);
-        usleep(800000);  // Wait longer (800ms) between changes
+        
+        // Wait 800ms between changes, but check for shutdown every 100ms
+        for (int j = 0; j < 8; j++) {
+            if (!running) {
+                daemon_log(LOG_INFO, "Shutdown requested during fan recovery - aborting");
+                return EXIT_FAILURE;
+            }
+            usleep(100000);  // 100ms chunks
+        }
         
         // Check if fan responded
         rpm = ec_query_fan_rpms();
@@ -1612,8 +1645,22 @@ static int attempt_fan_recovery(void) {
             
             // Gradually step down to ensure stability
             for (int step = 90; step >= MIN_FAN_DUTY; step -= 10) {
+                if (!running) {
+                    daemon_log(LOG_INFO, "Shutdown requested during fan recovery - aborting");
+                    return EXIT_FAILURE;
+                }
+                
                 ec_write_fan_duty(step);
-                usleep(500000);
+                
+                // Wait 500ms, but check for shutdown every 100ms
+                for (int k = 0; k < 5; k++) {
+                    if (!running) {
+                        daemon_log(LOG_INFO, "Shutdown requested during fan recovery - aborting");
+                        return EXIT_FAILURE;
+                    }
+                    usleep(100000);  // 100ms chunks
+                }
+                
                 rpm = ec_query_fan_rpms();
                 if (rpm < SAFE_FAN_RPM) {
                     // If RPM drops too low during step-down, go back to higher duty
