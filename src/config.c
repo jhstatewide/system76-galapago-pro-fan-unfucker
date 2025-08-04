@@ -30,9 +30,9 @@ clevo_config_t* config_init(void) {
     config->adaptive_tuning_interval = 30;
     config->adaptive_target_performance = 0.8;
     
-    config->max_duty_change_rate = 15;
-    config->max_duty_increase_rate = 10;
-    config->max_duty_decrease_rate = 30;
+    config->max_duty_change_rate = 25;  // Increased from 15 - softer overall change limit
+    config->max_duty_increase_rate = 15;  // Increased from 10 - allow faster response to heat
+    config->max_duty_decrease_rate = 20;  // Reduced from 30 - prevent sudden drops that cause stall
     config->fan_health_check_interval = 30;
     
     config->temp_validation_enabled = 1;

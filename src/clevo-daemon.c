@@ -93,9 +93,9 @@ static int target_temperature = 65;
 static int daemon_mode = 0;
 static int foreground_mode = 0;  // New flag for foreground operation
 static volatile int running = 1;
-int max_duty_change_rate = 15;  // Default max duty change per cycle (%)
-int max_duty_increase_rate = 10;  // Default max increase per cycle (%)
-int max_duty_decrease_rate = 30;  // Default max decrease per cycle (%)
+int max_duty_change_rate = 25;  // Increased from 15 - softer overall change limit
+int max_duty_increase_rate = 15;  // Increased from 10 - allow faster response to heat
+int max_duty_decrease_rate = 20;  // Reduced from 30 - prevent sudden drops that cause stall
 
 // Fan bearing protection variables
 static time_t last_duty_change_time = 0;
@@ -905,18 +905,18 @@ static int ec_auto_duty_adjust(void) {
             }
         }
     } else {
-        // Emergency rate limiting: Allow faster response for critical situations (reduced values)
+        // Emergency rate limiting: Allow faster response for critical situations (improved values)
         int emergency_max_change;
         
         if (temp_error >= 10) {
-            // Critical emergency: Allow up to 25% change per cycle (reduced from 50%)
-            emergency_max_change = 25;
+            // Critical emergency: Allow up to 35% change per cycle (increased from 25%)
+            emergency_max_change = 35;
         } else if (temp_error >= 8) {
-            // High emergency: Allow up to 15% change per cycle (reduced from 30%)
-            emergency_max_change = 15;
+            // High emergency: Allow up to 25% change per cycle (increased from 15%)
+            emergency_max_change = 25;
         } else {
-            // Moderate emergency: Allow up to 10% change per cycle (reduced from 20%)
-            emergency_max_change = 10;
+            // Moderate emergency: Allow up to 20% change per cycle (increased from 10%)
+            emergency_max_change = 20;
         }
         
         if (new_duty > current_duty + emergency_max_change) {
@@ -1232,9 +1232,9 @@ static void parse_command_line(int argc, char* argv[]) {
                 printf("  -l, --log-level LEVEL         Log level (0-7, default: 6)\n");
                 printf("  -L, --live-stats              Enable live statistics display\n");
                 printf("  -I, --live-stats-interval SECONDS  Live stats update interval (default: 0.1)\n");
-                printf("  -m, --max-duty-change RATE    Max duty change per cycle %% (default: 15)\n");
-                printf("  -M, --max-duty-increase RATE  Max duty increase per cycle %% (default: 10)\n");
-                printf("  -N, --max-duty-decrease RATE  Max duty decrease per cycle %% (default: 30)\n");
+                printf("  -m, --max-duty-change RATE    Max duty change per cycle %% (default: 25)\n");
+                printf("  -M, --max-duty-increase RATE  Max duty increase per cycle %% (default: 15)\n");
+                printf("  -N, --max-duty-decrease RATE  Max duty decrease per cycle %% (default: 20)\n");
                 printf("  -p, --privilege-help          Show privilege setup help\n\n");
                 printf("Arguments:\n");
                 printf("  FAN_DUTY                      Set fan to specific duty cycle (1-100%%)\n");
