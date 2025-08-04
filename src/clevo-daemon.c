@@ -299,7 +299,7 @@ int main(int argc, char* argv[]) {
         // Initialize DBus interface with enhanced error handling
         daemon_log(LOG_INFO, "Attempting to initialize DBus interface...");
         
-        if (foreground_mode) {
+        if (foreground_mode && debug_mode) {
             fprintf(stderr, "\n=== DBUS INITIALIZATION DEBUG ===\n");
             fprintf(stderr, "Running in foreground mode with enhanced debugging\n");
             fprintf(stderr, "This will show detailed DBus connection information\n");
@@ -307,7 +307,7 @@ int main(int argc, char* argv[]) {
         }
         
         if (init_dbus_interface() != 0) {
-            if (foreground_mode) {
+            if (foreground_mode && debug_mode) {
                 fprintf(stderr, "\n=== DBUS INITIALIZATION FAILED ===\n");
                 fprintf(stderr, "The daemon will now exit due to DBus initialization failure.\n");
                 fprintf(stderr, "Please check the debug output above for details.\n");
@@ -320,7 +320,7 @@ int main(int argc, char* argv[]) {
             daemon_log(LOG_ERR, "Failed to initialize DBus interface - EXITING");
             return EXIT_FAILURE;
         } else {
-            if (foreground_mode) {
+            if (foreground_mode && debug_mode) {
                 fprintf(stderr, "\n=== DBUS INITIALIZATION SUCCESS ===\n");
                 fprintf(stderr, "DBus interface initialized successfully!\n");
                 fprintf(stderr, "==========================================\n\n");

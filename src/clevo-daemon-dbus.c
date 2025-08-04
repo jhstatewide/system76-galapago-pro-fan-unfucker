@@ -55,8 +55,8 @@ static DBusConnection* dbus_conn = NULL;
 static volatile int dbus_running = 1;
 static int status_listeners_count = 0;
 
-// Debug mode flag - set to 1 for enhanced debugging
-static int dbus_debug_mode = 1;
+// Debug mode flag - set to 0 for production (1 for debugging)
+static int dbus_debug_mode = 0;
 
 // Enhanced logging function for DBus interface with debug mode
 static void dbus_log(int priority, const char* format, ...) {
@@ -114,9 +114,11 @@ static int send_signal(const char* signal_name, int cpu_temp, int fan_duty, int 
 static void dbus_signal_handler(int sig);
 
 int init_dbus_interface(void) {
-    fprintf(stderr, "DBUS_DEBUG: ==========================================\n");
-    fprintf(stderr, "DBUS_DEBUG: Starting DBus interface initialization\n");
-    fprintf(stderr, "DBUS_DEBUG: ==========================================\n");
+    if (dbus_debug_mode) {
+        fprintf(stderr, "DBUS_DEBUG: ==========================================\n");
+        fprintf(stderr, "DBUS_DEBUG: Starting DBus interface initialization\n");
+        fprintf(stderr, "DBUS_DEBUG: ==========================================\n");
+    }
     
     // Check DBus system bus availability first
     if (check_dbus_system_bus() != 0) {
@@ -265,18 +267,22 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
     const char* interface = dbus_message_get_interface(msg);
     const char* path = dbus_message_get_path(msg);
     
-    // Add debug logging for all messages
-    fprintf(stderr, "DBUS_DEBUG: Received DBus message - Type: %d, Interface: %s, Path: %s, Member: %s\n", 
-            dbus_message_get_type(msg),
-            interface ? interface : "NULL",
-            path ? path : "NULL",
-            method_name ? method_name : "NULL");
+    // Add debug logging for all messages (only in debug mode)
+    if (dbus_debug_mode) {
+        fprintf(stderr, "DBUS_DEBUG: Received DBus message - Type: %d, Interface: %s, Path: %s, Member: %s\n", 
+                dbus_message_get_type(msg),
+                interface ? interface : "NULL",
+                path ? path : "NULL",
+                method_name ? method_name : "NULL");
+    }
     
     // Handle signals (like NameAcquired) - just log and pass through
     if (dbus_message_get_type(msg) == DBUS_MESSAGE_TYPE_SIGNAL) {
-        fprintf(stderr, "DBUS_DEBUG: DBus signal received: %s (interface: %s)\n", 
-                method_name ? method_name : "NULL", 
-                interface ? interface : "NULL");
+        if (dbus_debug_mode) {
+            fprintf(stderr, "DBUS_DEBUG: DBus signal received: %s (interface: %s)\n", 
+                    method_name ? method_name : "NULL", 
+                    interface ? interface : "NULL");
+        }
         return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
     }
     
@@ -285,9 +291,11 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
         return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
     }
     
-    fprintf(stderr, "DBUS_DEBUG: DBus method call received: %s (interface: %s)\n", 
-            method_name ? method_name : "NULL", 
-            interface ? interface : "NULL");
+    if (dbus_debug_mode) {
+        fprintf(stderr, "DBUS_DEBUG: DBus method call received: %s (interface: %s)\n", 
+                method_name ? method_name : "NULL", 
+                interface ? interface : "NULL");
+    }
     
     if (!method_name || !interface) {
         fprintf(stderr, "DBUS_DEBUG: Invalid method call - missing method name or interface\n");
@@ -309,24 +317,22 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
     
     // Handle different method calls
     if (strcmp(method_name, "GetStatus") == 0) {
-        fprintf(stderr, "DBUS_DEBUG: Handling GetStatus method call\n");
+        if (dbus_debug_mode) {
+            fprintf(stderr, "DBUS_DEBUG: Handling GetStatus method call\n");
+        }
         
         // Check if share_info is valid
         if (!share_info) {
-            fprintf(stderr, "DBUS_DEBUG: ERROR - share_info is NULL!\n");
+            fprintf(stderr, "ERROR: share_info is NULL!\n");
             return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
         }
         
-        fprintf(stderr, "DBUS_DEBUG: share_info is valid, creating reply...\n");
-        
-        // Create reply message (same approach as working test program)
+        // Create reply message
         DBusMessage* reply = dbus_message_new_method_return(msg);
         if (!reply) {
-            fprintf(stderr, "DBUS_DEBUG: Failed to create reply message\n");
+            fprintf(stderr, "ERROR: Failed to create reply message\n");
             return DBUS_HANDLER_RESULT_NEED_MEMORY;
         }
-        
-        fprintf(stderr, "DBUS_DEBUG: Reply message created, adding response...\n");
         
         // Add response string
         DBusMessageIter iter;
@@ -341,26 +347,18 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
                 share_info->fan_rpms,
                 share_info->auto_duty);
         
-        fprintf(stderr, "DBUS_DEBUG: Response string created: %s\n", response);
-        
         // Use a const pointer to the string
         const char* response_ptr = response;
-        
-        fprintf(stderr, "DBUS_DEBUG: About to append string to message...\n");
         dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &response_ptr);
-        fprintf(stderr, "DBUS_DEBUG: String appended successfully\n");
-        
-        fprintf(stderr, "DBUS_DEBUG: Response added to message, sending reply...\n");
         
         // Send reply
         if (!dbus_connection_send(dbus_conn, reply, NULL)) {
-            fprintf(stderr, "DBUS_DEBUG: Failed to send reply\n");
+            fprintf(stderr, "ERROR: Failed to send reply\n");
             dbus_message_unref(reply);
             return DBUS_HANDLER_RESULT_NEED_MEMORY;
         }
         
         dbus_message_unref(reply);
-        fprintf(stderr, "DBUS_DEBUG: Successfully sent GetStatus reply\n");
         return DBUS_HANDLER_RESULT_HANDLED;
         
     } else if (strcmp(method_name, "SetFanDuty") == 0) {
@@ -369,10 +367,12 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
         
         int duty;
         if (dbus_message_get_args(msg, &error, DBUS_TYPE_INT32, &duty, DBUS_TYPE_INVALID)) {
-            if (duty >= 1 && duty <= 100) {
-                share_info->auto_duty = 0;
-                share_info->manual_next_fan_duty = duty;
+                    if (duty >= 1 && duty <= 100) {
+            share_info->auto_duty = 0;
+            share_info->manual_next_fan_duty = duty;
+            if (dbus_debug_mode) {
                 fprintf(stderr, "DBUS_DEBUG: DBus client requested fan duty: %d%%\n", duty);
+            }
                 
                 // Create reply message
                 DBusMessage* reply = dbus_message_new_method_return(msg);
@@ -423,7 +423,9 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
         if (dbus_message_get_args(msg, &error, DBUS_TYPE_BOOLEAN, &enabled, DBUS_TYPE_INVALID)) {
             share_info->auto_duty = enabled ? 1 : 0;
             share_info->manual_next_fan_duty = 0;
-            fprintf(stderr, "DBUS_DEBUG: DBus client %s auto mode\n", enabled ? "enabled" : "disabled");
+            if (dbus_debug_mode) {
+                fprintf(stderr, "DBUS_DEBUG: DBus client %s auto mode\n", enabled ? "enabled" : "disabled");
+            }
             
             // Create reply message
             DBusMessage* reply = dbus_message_new_method_return(msg);
@@ -457,7 +459,9 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
         
     } else if (strcmp(method_name, "SubscribeStatus") == 0) {
         status_listeners_count++;
-        fprintf(stderr, "DBUS_DEBUG: Client subscribed to status updates (total: %d)\n", status_listeners_count);
+        if (dbus_debug_mode) {
+            fprintf(stderr, "DBUS_DEBUG: Client subscribed to status updates (total: %d)\n", status_listeners_count);
+        }
         
         // Create reply message
         DBusMessage* reply = dbus_message_new_method_return(msg);
@@ -482,7 +486,9 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
         if (status_listeners_count > 0) {
             status_listeners_count--;
         }
-        fprintf(stderr, "DBUS_DEBUG: Client unsubscribed from status updates (total: %d)\n", status_listeners_count);
+        if (dbus_debug_mode) {
+            fprintf(stderr, "DBUS_DEBUG: Client unsubscribed from status updates (total: %d)\n", status_listeners_count);
+        }
         
         // Create reply message
         DBusMessage* reply = dbus_message_new_method_return(msg);
@@ -511,7 +517,9 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
         if (dbus_message_get_args(msg, &error, DBUS_TYPE_INT32, &rate, DBUS_TYPE_INVALID)) {
             if (rate >= 1 && rate <= 100) {
                 max_duty_change_rate = rate;
-                fprintf(stderr, "DBUS_DEBUG: DBus client set max duty change rate: %d%%\n", rate);
+                if (dbus_debug_mode) {
+                    fprintf(stderr, "DBUS_DEBUG: DBus client set max duty change rate: %d%%\n", rate);
+                }
                 
                 // Create reply message
                 DBusMessage* reply = dbus_message_new_method_return(msg);

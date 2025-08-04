@@ -16,6 +16,14 @@ set(SOURCES
     src/clevo-settings.cpp
 )
 
+# Set up DBus source files (without socket dependency)
+set(SOURCES_DBUS
+    src/clevo-gui-dbus.cpp
+    src/gui_display.cpp
+    src/gui_config.cpp
+    src/clevo-settings.cpp
+)
+
 set(HEADERS
     src/clevo-gui.h
     src/gui_display.h
@@ -34,6 +42,17 @@ set_target_properties(clevo-gui PROPERTIES
 
 # Link Qt6 libraries
 target_link_libraries(clevo-gui Qt6::Widgets)
+
+# Create DBus executable
+add_executable(clevo-gui-dbus ${SOURCES_DBUS} ${HEADERS})
+
+# Enable Qt MOC for DBus version
+set_target_properties(clevo-gui-dbus PROPERTIES
+    AUTOMOC ON
+)
+
+# Link Qt6 libraries for DBus version
+target_link_libraries(clevo-gui-dbus Qt6::Widgets Qt6::DBus)
 
 # Set compiler flags
 target_compile_options(clevo-gui PRIVATE -Wall -Wextra)

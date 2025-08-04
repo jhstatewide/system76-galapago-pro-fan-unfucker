@@ -67,7 +67,7 @@ UI_CFLAGS = `pkg-config --cflags ayatana-appindicator3-0.1`
 UI_LDFLAGS = `pkg-config --libs ayatana-appindicator3-0.1`
 
 # Default target builds both original and modular versions
-all: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET) $(DBUS_CLIENT_TARGET)
+all: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET) bin/clevo-dbus-client bin/clevo-client-dbus
 
 # Original targets (for backward compatibility)
 original: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
@@ -75,11 +75,13 @@ original: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
 # Modular target (optional - may have compilation issues)
 modular: $(MODULAR_TARGET)
 
-install: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
+install: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET) bin/clevo-dbus-client bin/clevo-client-dbus
 	@echo Install to ${DSTDIR}/bin/
 	@sudo install -m 4750 -g adm $(TARGET) ${DSTDIR}/bin/
 	@sudo install -m 4750 -g adm $(DAEMON_TARGET) ${DSTDIR}/bin/
 	@sudo install -m 755 $(CLIENT_TARGET) ${DSTDIR}/bin/
+	@sudo install -m 755 bin/clevo-dbus-client ${DSTDIR}/bin/
+	@sudo install -m 755 bin/clevo-client-dbus ${DSTDIR}/bin/
 
 install-opt: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
 	@echo Installing to ${OPT_DIR}/
@@ -156,7 +158,19 @@ $(CLIENT_TARGET): $(CLIENT_OBJ) Makefile
 $(DBUS_CLIENT_TARGET): $(DBUS_CLIENT_OBJ) Makefile
 	@mkdir -p bin
 	@echo linking $(DBUS_CLIENT_TARGET) from $(DBUS_CLIENT_OBJ)
-	@$(CC) $(DBUS_CLIENT_OBJ) -o $(DBUS_CLIENT_TARGET) $(LDFLAGS) -ldbus-1
+	@$(CC) $(DBUS_CLIENT_OBJ) -o $(DBUS_CLIENT_TARGET) $(LDFLAGS) -ldbus-1 -lncurses
+
+# Build the new DBus client separately
+bin/clevo-client-dbus: obj/clevo-client-dbus.o Makefile
+	@mkdir -p bin
+	@echo linking clevo-client-dbus from obj/clevo-client-dbus.o
+	@$(CC) obj/clevo-client-dbus.o -o bin/clevo-client-dbus $(LDFLAGS) -ldbus-1 -lncurses
+
+# Build the original DBus client separately
+bin/clevo-dbus-client: obj/clevo-dbus-client.o Makefile
+	@mkdir -p bin
+	@echo linking clevo-dbus-client from obj/clevo-dbus-client.o
+	@$(CC) obj/clevo-dbus-client.o -o bin/clevo-dbus-client $(LDFLAGS) -ldbus-1
 
 $(DIAG_TARGET): $(DIAG_OBJ) Makefile
 	@mkdir -p bin
