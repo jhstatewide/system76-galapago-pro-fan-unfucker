@@ -1022,7 +1022,7 @@ static void parse_command_line(int argc, char* argv[]) {
             printf("PID controller state reset.\n");
             i++; // Skip the next argument
         } else if (strcmp(argv[i], "-?") == 0 || strcmp(argv[i], "--help") == 0) {
-            printf(
+            printf("%s",
                     "\n\
 Usage: clevo-indicator [OPTIONS] [fan-duty-percentage]\n\
 \n\

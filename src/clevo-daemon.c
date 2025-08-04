@@ -43,6 +43,7 @@
 
 #include "privilege_manager.h"
 #include "clevo-daemon-socket.h"
+#include "clevo-daemon-dbus.h"
 #include "fan_constants.h"
 
 #define NAME "clevo-daemon"
@@ -294,16 +295,33 @@ int main(int argc, char* argv[]) {
             return EXIT_FAILURE;
         }
         
+        // Initialize DBus interface
+        if (init_dbus_interface() != 0) {
+            daemon_log(LOG_ERR, "Failed to initialize DBus interface");
+            // Don't fail completely, socket interface is still available
+        }
+        
         daemon_log(LOG_INFO, "Starting fan control daemon with target temperature %d°C", target_temperature);
         
         // Run the main daemon loop
         while (running) {
             daemon_ec_worker();
+            
+            // Process DBus messages
+            process_dbus_messages();
+            
+            // Broadcast status update to DBus clients (only if listeners exist)
+            broadcast_status_update(share_info->cpu_temp, share_info->fan_duty, 
+                                 share_info->fan_rpms, share_info->auto_duty);
+            
             usleep((int)(status_interval * 1000000)); // Convert to microseconds
         }
         
         // Stop socket server
         stop_socket_server();
+        
+        // Stop DBus interface
+        stop_dbus_interface();
         
         daemon_log(LOG_INFO, "Daemon stopped");
     } else {
@@ -331,11 +349,24 @@ int main(int argc, char* argv[]) {
                 return EXIT_FAILURE;
             }
             
+            // Initialize DBus interface
+            if (init_dbus_interface() != 0) {
+                daemon_log(LOG_ERR, "Failed to initialize DBus interface");
+                // Don't fail completely, socket interface is still available
+            }
+            
             daemon_log(LOG_INFO, "Starting fan control daemon with target temperature %d°C", target_temperature);
             
             // Run the main daemon loop
             while (running) {
                 daemon_ec_worker();
+                
+                // Process DBus messages
+                process_dbus_messages();
+                
+                // Broadcast status update to DBus clients (only if listeners exist)
+                broadcast_status_update(share_info->cpu_temp, share_info->fan_duty, 
+                                     share_info->fan_rpms, share_info->auto_duty);
                 
                 // Use shorter sleep intervals to check for signals more frequently
                 int sleep_us = (int)(status_interval * 1000000);
@@ -350,6 +381,9 @@ int main(int argc, char* argv[]) {
             
             // Stop socket server
             stop_socket_server();
+            
+            // Stop DBus interface
+            stop_dbus_interface();
             
             daemon_log(LOG_INFO, "Daemon stopped");
         } else {

@@ -11,8 +11,9 @@ SRCDIR := src
 
 # Original monolithic source files
 SRC = clevo-indicator.c privilege_manager.c
-DAEMON_SRC = clevo-daemon.c clevo-daemon-socket.c privilege_manager.c
+DAEMON_SRC = clevo-daemon.c clevo-daemon-socket.c clevo-daemon-dbus.c privilege_manager.c
 CLIENT_SRC = clevo-client.c
+DBUS_CLIENT_SRC = clevo-dbus-client.c
 DIAG_SRC = ec_diagnostic.c
 TEST_SRC = test_settings.c
 
@@ -34,6 +35,7 @@ MODULAR_SRCS = main_new.c \
 OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(SRC))
 DAEMON_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(DAEMON_SRC))
 CLIENT_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(CLIENT_SRC))
+DBUS_CLIENT_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(DBUS_CLIENT_SRC))
 DIAG_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(DIAG_SRC))
 TEST_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(TEST_SRC))
 MODULAR_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(MODULAR_SRCS))
@@ -42,6 +44,7 @@ MODULAR_OBJ = $(patsubst %.c,$(OBJDIR)/%.o,$(MODULAR_SRCS))
 TARGET = bin/clevo-indicator
 DAEMON_TARGET = bin/clevo-daemon
 CLIENT_TARGET = bin/clevo-client
+DBUS_CLIENT_TARGET = bin/clevo-dbus-client
 DIAG_TARGET = bin/ec_diagnostic
 TEST_TARGET = bin/test_settings
 MODULAR_TARGET = bin/clevo-daemon-modular
@@ -64,7 +67,7 @@ UI_CFLAGS = `pkg-config --cflags ayatana-appindicator3-0.1`
 UI_LDFLAGS = `pkg-config --libs ayatana-appindicator3-0.1`
 
 # Default target builds both original and modular versions
-all: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
+all: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET) $(DBUS_CLIENT_TARGET)
 
 # Original targets (for backward compatibility)
 original: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
@@ -143,12 +146,17 @@ $(TARGET): $(OBJ) Makefile
 $(DAEMON_TARGET): $(DAEMON_OBJ) Makefile
 	@mkdir -p bin
 	@echo linking $(DAEMON_TARGET) from $(DAEMON_OBJ)
-	@$(CC) $(DAEMON_OBJ) -o $(DAEMON_TARGET) $(LDFLAGS) -lm -lpthread -lncurses
+	@$(CC) $(DAEMON_OBJ) -o $(DAEMON_TARGET) $(LDFLAGS) -lm -lpthread -lncurses -ldbus-1
 
 $(CLIENT_TARGET): $(CLIENT_OBJ) Makefile
 	@mkdir -p bin
 	@echo linking $(CLIENT_TARGET) from $(CLIENT_OBJ)
 	@$(CC) $(CLIENT_OBJ) -o $(CLIENT_TARGET) $(LDFLAGS) -lm -lncurses
+
+$(DBUS_CLIENT_TARGET): $(DBUS_CLIENT_OBJ) Makefile
+	@mkdir -p bin
+	@echo linking $(DBUS_CLIENT_TARGET) from $(DBUS_CLIENT_OBJ)
+	@$(CC) $(DBUS_CLIENT_OBJ) -o $(DBUS_CLIENT_TARGET) $(LDFLAGS) -ldbus-1
 
 $(DIAG_TARGET): $(DIAG_OBJ) Makefile
 	@mkdir -p bin
@@ -167,7 +175,7 @@ $(MODULAR_TARGET): $(MODULAR_OBJ) Makefile
 	@$(CC) $(MODULAR_OBJ) -o $(MODULAR_TARGET) $(LDFLAGS) -lm -lpthread -lncurses
 
 clean:
-	rm -f $(OBJ) $(DAEMON_OBJ) $(CLIENT_OBJ) $(DIAG_OBJ) $(TEST_OBJ) $(MODULAR_OBJ) $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET) $(DIAG_TARGET) $(TEST_TARGET) $(MODULAR_TARGET)
+	rm -f $(OBJ) $(DAEMON_OBJ) $(CLIENT_OBJ) $(DBUS_CLIENT_OBJ) $(DIAG_OBJ) $(TEST_OBJ) $(MODULAR_OBJ) $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET) $(DBUS_CLIENT_TARGET) $(DIAG_TARGET) $(TEST_TARGET) $(MODULAR_TARGET)
 
 # Compilation rules for original files
 $(OBJDIR)/%.o : $(SRCDIR)/%.c Makefile
