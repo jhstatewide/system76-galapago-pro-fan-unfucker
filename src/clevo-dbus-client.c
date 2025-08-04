@@ -58,6 +58,7 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "Failed to connect to DBus\n");
         return EXIT_FAILURE;
     }
+    printf("Successfully connected to DBus system bus\n");
     
     const char* command = argv[1];
     
@@ -76,7 +77,7 @@ int main(int argc, char* argv[]) {
         dbus_message_unref(msg);
         
         if (!reply) {
-            fprintf(stderr, "Failed to get status\n");
+            fprintf(stderr, "Failed to get status - no reply received\n");
             return EXIT_FAILURE;
         }
         
@@ -174,10 +175,10 @@ static int connect_to_dbus(void) {
     DBusError error;
     dbus_error_init(&error);
     
-    // Connect to session bus
-    dbus_conn = dbus_bus_get(DBUS_BUS_SESSION, &error);
+    // Connect to system bus (where the daemon runs)
+    dbus_conn = dbus_bus_get(DBUS_BUS_SYSTEM, &error);
     if (!dbus_conn) {
-        fprintf(stderr, "Failed to connect to session bus: %s\n", error.message);
+        fprintf(stderr, "Failed to connect to system bus: %s\n", error.message);
         dbus_error_free(&error);
         return 0;
     }

@@ -87,6 +87,7 @@ static int log_level = LOG_INFO;
 static double status_interval = 2.0;
 static int target_temperature = 65;
 static int daemon_mode = 0;
+static int foreground_mode = 0;  // New flag for foreground operation
 static volatile int running = 1;
 int max_duty_change_rate = 15;  // Default max duty change per cycle (%)
 int max_duty_increase_rate = 10;  // Default max increase per cycle (%)
@@ -284,8 +285,8 @@ int main(int argc, char* argv[]) {
         signal_term(&daemon_on_sigterm);
         daemon_init_share();
         
-        // Daemonize if not in debug mode AND not in live stats mode
-        if (!debug_mode && !live_stats_mode) {
+        // Daemonize if not in debug mode AND not in live stats mode AND not in foreground mode
+        if (!debug_mode && !live_stats_mode && !foreground_mode) {
             daemonize();
         }
         
@@ -295,13 +296,48 @@ int main(int argc, char* argv[]) {
             return EXIT_FAILURE;
         }
         
-        // Initialize DBus interface
+        // Initialize DBus interface with enhanced error handling
+        daemon_log(LOG_INFO, "Attempting to initialize DBus interface...");
+        
+        if (foreground_mode) {
+            fprintf(stderr, "\n=== DBUS INITIALIZATION DEBUG ===\n");
+            fprintf(stderr, "Running in foreground mode with enhanced debugging\n");
+            fprintf(stderr, "This will show detailed DBus connection information\n");
+            fprintf(stderr, "==========================================\n\n");
+        }
+        
         if (init_dbus_interface() != 0) {
-            daemon_log(LOG_ERR, "Failed to initialize DBus interface");
-            // Don't fail completely, socket interface is still available
+            if (foreground_mode) {
+                fprintf(stderr, "\n=== DBUS INITIALIZATION FAILED ===\n");
+                fprintf(stderr, "The daemon will now exit due to DBus initialization failure.\n");
+                fprintf(stderr, "Please check the debug output above for details.\n");
+                fprintf(stderr, "Common solutions:\n");
+                fprintf(stderr, "1. Ensure DBus is running: sudo systemctl start dbus\n");
+                fprintf(stderr, "2. Check if another instance is running: sudo pkill clevo-daemon\n");
+                fprintf(stderr, "3. Verify system bus permissions\n");
+                fprintf(stderr, "==========================================\n");
+            }
+            daemon_log(LOG_ERR, "Failed to initialize DBus interface - EXITING");
+            return EXIT_FAILURE;
+        } else {
+            if (foreground_mode) {
+                fprintf(stderr, "\n=== DBUS INITIALIZATION SUCCESS ===\n");
+                fprintf(stderr, "DBus interface initialized successfully!\n");
+                fprintf(stderr, "==========================================\n\n");
+            }
+            daemon_log(LOG_INFO, "DBus interface initialized successfully");
         }
         
         daemon_log(LOG_INFO, "Starting fan control daemon with target temperature %d°C", target_temperature);
+        
+        if (foreground_mode) {
+            fprintf(stderr, "Daemon running in foreground mode. Press Ctrl+C to stop.\n");
+            fprintf(stderr, "Target temperature: %d°C\n", target_temperature);
+            fprintf(stderr, "Status interval: %.1f seconds\n", status_interval);
+            fprintf(stderr, "Debug mode: %s\n", debug_mode ? "enabled" : "disabled");
+            fprintf(stderr, "Live stats: %s\n", live_stats_mode ? "enabled" : "disabled");
+            fprintf(stderr, "==========================================\n\n");
+        }
         
         // Run the main daemon loop
         while (running) {
@@ -338,8 +374,8 @@ int main(int argc, char* argv[]) {
             signal_term(&daemon_on_sigterm);
             daemon_init_share();
             
-            // Daemonize if not in debug mode AND not in live stats mode
-            if (!debug_mode && !live_stats_mode) {
+            // Daemonize if not in debug mode AND not in live stats mode AND not in foreground mode
+            if (!debug_mode && !live_stats_mode && !foreground_mode) {
                 daemonize();
             }
             
@@ -349,13 +385,48 @@ int main(int argc, char* argv[]) {
                 return EXIT_FAILURE;
             }
             
-            // Initialize DBus interface
+            // Initialize DBus interface with enhanced error handling
+            daemon_log(LOG_INFO, "Attempting to initialize DBus interface...");
+            
+            if (foreground_mode) {
+                fprintf(stderr, "\n=== DBUS INITIALIZATION DEBUG ===\n");
+                fprintf(stderr, "Running in foreground mode with enhanced debugging\n");
+                fprintf(stderr, "This will show detailed DBus connection information\n");
+                fprintf(stderr, "==========================================\n\n");
+            }
+            
             if (init_dbus_interface() != 0) {
-                daemon_log(LOG_ERR, "Failed to initialize DBus interface");
-                // Don't fail completely, socket interface is still available
+                if (foreground_mode) {
+                    fprintf(stderr, "\n=== DBUS INITIALIZATION FAILED ===\n");
+                    fprintf(stderr, "The daemon will now exit due to DBus initialization failure.\n");
+                    fprintf(stderr, "Please check the debug output above for details.\n");
+                    fprintf(stderr, "Common solutions:\n");
+                    fprintf(stderr, "1. Ensure DBus is running: sudo systemctl start dbus\n");
+                    fprintf(stderr, "2. Check if another instance is running: sudo pkill clevo-daemon\n");
+                    fprintf(stderr, "3. Verify system bus permissions\n");
+                    fprintf(stderr, "==========================================\n");
+                }
+                daemon_log(LOG_ERR, "Failed to initialize DBus interface - EXITING");
+                return EXIT_FAILURE;
+            } else {
+                if (foreground_mode) {
+                    fprintf(stderr, "\n=== DBUS INITIALIZATION SUCCESS ===\n");
+                    fprintf(stderr, "DBus interface initialized successfully!\n");
+                    fprintf(stderr, "==========================================\n\n");
+                }
+                daemon_log(LOG_INFO, "DBus interface initialized successfully");
             }
             
             daemon_log(LOG_INFO, "Starting fan control daemon with target temperature %d°C", target_temperature);
+            
+            if (foreground_mode) {
+                fprintf(stderr, "Daemon running in foreground mode. Press Ctrl+C to stop.\n");
+                fprintf(stderr, "Target temperature: %d°C\n", target_temperature);
+                fprintf(stderr, "Status interval: %.1f seconds\n", status_interval);
+                fprintf(stderr, "Debug mode: %s\n", debug_mode ? "enabled" : "disabled");
+                fprintf(stderr, "Live stats: %s\n", live_stats_mode ? "enabled" : "disabled");
+                fprintf(stderr, "==========================================\n\n");
+            }
             
             // Run the main daemon loop
             while (running) {
@@ -395,7 +466,6 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    // Clean up live stats if enabled
     if (live_stats_mode) {
         live_stats_cleanup();
     }
@@ -1038,200 +1108,140 @@ static void signal_term(__sighandler_t handler) {
 
 static void parse_command_line(int argc, char* argv[]) {
     static struct option long_options[] = {
-        {"debug",        no_argument,       0, 'd'},
-        {"interval",     required_argument, 0, 'i'},
-        {"target-temp",  required_argument, 0, 't'},
-        {"daemon",       no_argument,       0, 'D'},
-        {"pid-enabled",  required_argument, 0, 'p'},
-        {"adaptive-pid", required_argument, 0, 'a'},
-        {"adaptive-tuning-interval", required_argument, 0, 'A'},
-        {"adaptive-target-performance", required_argument, 0, 'P'},
-        {"fan-health-check", required_argument, 0, 'f'},
+        {"help", no_argument, 0, 'h'},
+        {"debug", no_argument, 0, 'd'},
+        {"daemon", no_argument, 0, 'D'},
+        {"foreground", no_argument, 0, 'f'},  // New foreground option
+        {"interval", required_argument, 0, 'i'},
+        {"target", required_argument, 0, 't'},
+        {"log-level", required_argument, 0, 'l'},
+        {"live-stats", no_argument, 0, 'L'},
+        {"live-stats-interval", required_argument, 0, 'I'},
         {"max-duty-change", required_argument, 0, 'm'},
-        {"temp-validation", required_argument, 0, 'v'},
-        {"max-temp-change", required_argument, 0, 'T'},
-        {"live-stats",   no_argument,       0, 'L'},
-        {"help",         no_argument,       0, 'h'},
-        {"max-increase-rate", required_argument, 0, 0x100},
-        {"max-decrease-rate", required_argument, 0, 0x101},
-        {"quiet", no_argument, 0, 'q'},
-        {"log-level", required_argument, 0, 0x200},
+        {"max-duty-increase", required_argument, 0, 'M'},
+        {"max-duty-decrease", required_argument, 0, 'N'},
+        {"privilege-help", no_argument, 0, 'p'},
         {0, 0, 0, 0}
     };
     
     int option_index = 0;
     int c;
     
-    while ((c = getopt_long(argc, argv, "di:t:Dp:a:A:P:f:s:m:v:T:Lh?q", long_options, &option_index)) != -1) {
+    while ((c = getopt_long(argc, argv, "hdDfi:t:l:LI:m:M:N:p", long_options, &option_index)) != -1) {
         switch (c) {
+            case 'h':
+                printf("Clevo Fan Control Daemon\n\n");
+                printf("Usage: %s [OPTIONS] [FAN_DUTY|TARGET_TEMP]\n\n", NAME);
+                printf("Options:\n");
+                printf("  -h, --help                    Show this help message\n");
+                printf("  -d, --debug                   Enable debug mode\n");
+                printf("  -D, --daemon                  Run in daemon mode (default)\n");
+                printf("  -f, --foreground              Run in foreground mode with enhanced debugging\n");
+                printf("  -i, --interval SECONDS        Status update interval (default: 2.0)\n");
+                printf("  -t, --target TEMP             Target temperature in Celsius (default: 65)\n");
+                printf("  -l, --log-level LEVEL         Log level (0-7, default: 6)\n");
+                printf("  -L, --live-stats              Enable live statistics display\n");
+                printf("  -I, --live-stats-interval SECONDS  Live stats update interval (default: 0.1)\n");
+                printf("  -m, --max-duty-change RATE    Max duty change per cycle %% (default: 15)\n");
+                printf("  -M, --max-duty-increase RATE  Max duty increase per cycle %% (default: 10)\n");
+                printf("  -N, --max-duty-decrease RATE  Max duty decrease per cycle %% (default: 30)\n");
+                printf("  -p, --privilege-help          Show privilege setup help\n\n");
+                printf("Arguments:\n");
+                printf("  FAN_DUTY                      Set fan to specific duty cycle (1-100%%)\n");
+                printf("  TARGET_TEMP                   Set target temperature (40-100°C)\n\n");
+                printf("Examples:\n");
+                printf("  %s --foreground               # Run in foreground with debug output\n", NAME);
+                printf("  %s --debug --foreground       # Run in foreground with debug mode\n", NAME);
+                printf("  %s 50                         # Set fan to 50%% duty\n", NAME);
+                printf("  %s 70                         # Run daemon with 70°C target\n", NAME);
+                printf("  %s --live-stats               # Run with live statistics\n", NAME);
+                exit(EXIT_SUCCESS);
+                break;
+                
             case 'd':
                 debug_mode = 1;
-                log_level = LOG_DEBUG;
                 break;
-            case 'i':
-                status_interval = atof(optarg);
-                if (status_interval < 0.1 || status_interval > 60.0) {
-                    printf("Invalid interval: %.1f (must be 0.1-60.0 seconds)\n", status_interval);
-                    exit(EXIT_FAILURE);
-                }
-                break;
-            case 't':
-                target_temperature = atoi(optarg);
-                if (target_temperature < 40 || target_temperature > 100) {
-                    printf("Invalid target temperature: %d (must be 40-100°C)\n", target_temperature);
-                    exit(EXIT_FAILURE);
-                }
-                break;
+                
             case 'D':
                 daemon_mode = 1;
                 break;
-            case 'p':
-                pid_enabled = atoi(optarg);
-                break;
-            case 'a':
-                adaptive_pid_enabled = atoi(optarg);
-                break;
-            case 'A':
-                adaptive_tuning_interval = atoi(optarg);
-                if (adaptive_tuning_interval < 10) adaptive_tuning_interval = 10;
-                if (adaptive_tuning_interval > 300) adaptive_tuning_interval = 300;
-                break;
-            case 'P':
-                adaptive_target_performance = atof(optarg);
-                if (adaptive_target_performance < 0.1) adaptive_target_performance = 0.1;
-                if (adaptive_target_performance > 1.0) adaptive_target_performance = 1.0;
-                break;
+                
             case 'f':
-                fan_health_check_interval = atoi(optarg);
-                if (fan_health_check_interval < 10) fan_health_check_interval = 10;
-                if (fan_health_check_interval > 300) fan_health_check_interval = 300;
+                foreground_mode = 1;
+                debug_mode = 1;  // Enable debug mode when running in foreground
                 break;
-            case 's':
-                // Removed fan_stuck_threshold handling since we removed the variable
-                printf("Warning: --fan-stuck-threshold option is deprecated and ignored\n");
+                
+            case 'i':
+                status_interval = atof(optarg);
+                if (status_interval <= 0) {
+                    fprintf(stderr, "Error: Invalid interval value: %s\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
                 break;
+                
+            case 't':
+                target_temperature = atoi(optarg);
+                if (target_temperature < 40 || target_temperature > 100) {
+                    fprintf(stderr, "Error: Target temperature must be between 40 and 100°C\n");
+                    exit(EXIT_FAILURE);
+                }
+                break;
+                
+            case 'l':
+                log_level = atoi(optarg);
+                if (log_level < 0 || log_level > 7) {
+                    fprintf(stderr, "Error: Log level must be between 0 and 7\n");
+                    exit(EXIT_FAILURE);
+                }
+                break;
+                
+            case 'L':
+                live_stats_mode = 1;
+                break;
+                
+            case 'I':
+                live_stats_interval = atof(optarg);
+                if (live_stats_interval <= 0) {
+                    fprintf(stderr, "Error: Invalid live stats interval value: %s\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
+                break;
+                
             case 'm':
                 max_duty_change_rate = atoi(optarg);
                 if (max_duty_change_rate < 1 || max_duty_change_rate > 100) {
-                    printf("Invalid max duty change rate: %d (must be 1-100%%)\n", max_duty_change_rate);
+                    fprintf(stderr, "Error: Max duty change rate must be between 1 and 100%%\n");
                     exit(EXIT_FAILURE);
                 }
                 break;
-            case 'v':
-                temp_validation_enabled = atoi(optarg);
-                break;
-            case 'T':
-                max_temp_change_per_cycle = atoi(optarg);
-                if (max_temp_change_per_cycle < 1 || max_temp_change_per_cycle > 50) {
-                    printf("Invalid max temperature change: %d (must be 1-50°C)\n", max_temp_change_per_cycle);
-                    exit(EXIT_FAILURE);
-                }
-                break;
-            case 'L':
-                live_stats_mode = 1;
-                // Don't automatically enable debug mode - it interferes with ncurses display
-                // debug_mode = 1;  // Enable debug mode when live stats is enabled
-                // log_level = LOG_DEBUG;
-                break;
-            case 'h':
-            case '?':
-                printf(
-                    "\n"
-                    "Usage: clevo-daemon [OPTIONS] [fan-duty-percentage|target-temperature]\n"
-                    "\n"
-                    "Headless fan control daemon for Clevo laptops.\n"
-                    "\n"
-                    "Options:\n"
-                    "  -d, --debug\t\tEnable debug output (prevents daemonization)\n"
-                    "  -i, --interval <sec>\tSet status update interval (0.1-60.0 seconds, default: 2.0)\n"
-                    "  -t, --target-temp <°C>\tSet the target temperature for auto fan control (40-100°C, default: 65)\n"
-                    "  -D, --daemon\t\tExplicitly run in daemon mode (default behavior)\n"
-                    "  -p, --pid-enabled <0|1>\tEnable/Disable PID control (default: 1)\n"
-                    "  -a, --adaptive-pid <0|1>\tEnable/Disable adaptive PID tuning (default: 0)\n"
-                    "  -A, --adaptive-tuning-interval <sec>\tSet adaptive tuning interval (10-300s, default: 30)\n"
-                    "  -P, --adaptive-target-performance <value>\tSet target performance score (0.1-1.0, default: 0.8)\n"
-                    "  -f, --fan-health-check <sec>\tSet fan health check interval (10-300s, default: 30)\n"
-                    "  -m, --max-duty-change <%%>\tSet the maximum duty change per cycle (1-100, default: 15)\n"
-                    "  -v, --temp-validation <0|1>\tEnable/Disable temperature validation (default: 1)\n"
-                    "  -T, --max-temp-change <°C>\tSet max temperature change per cycle (1-50°C, default: 10)\n"
-                    "  -L, --live-stats\tEnable live statistics display (prevents daemonization)\n"
-                    "  -h, -?, --help\tDisplay this help and exit\n"
-                    "  --max-increase-rate <%%>   Set max fan duty increase per cycle (1-100, default: 10)\n"
-                    "  --max-decrease-rate <%%>   Set max fan duty decrease per cycle (1-100, default: 30)\n"
-                    "  -q, --quiet                Suppress all logging except errors\n"
-                    "  --log-level LEVEL          Set log level: error, warning, info, debug\n"
-                    "\n"
-                    "Modes:\n"
-                    "  Daemon Mode (default):\n"
-                    "    - No arguments: Run daemon with default target temperature (65°C)\n"
-                    "    - --target-temp N: Run daemon with target temperature N°C\n"
-                    "    - --daemon: Explicitly run in daemon mode\n"
-                    "    - Temperature argument (40-100): Run daemon with that target temperature\n"
-                    "\n"
-                    "  CLI Mode:\n"
-                    "    - Fan duty argument (1-100): Set fan to that percentage and exit\n"
-                    "\n"
-                    "Examples:\n"
-                    "  ./clevo-daemon                    # Daemon mode, target 65°C\n"
-                    "  ./clevo-daemon --target-temp 55   # Daemon mode, target 55°C\n"
-                    "  ./clevo-daemon 55                 # Daemon mode, target 55°C\n"
-                    "  ./clevo-daemon 50                 # CLI mode, set fan to 50%%\n"
-                    "  ./clevo-daemon --debug            # Daemon mode with debug output\n"
-                    "  ./clevo-daemon --live-stats       # Live statistics display\n"
-                    "\n"
-                    "Modern Privilege Management:\n"
-                    "This program supports multiple privilege elevation methods:\n"
-                    "\n"
-                    "1. Capabilities (Recommended):\n"
-                    "   sudo setcap cap_sys_rawio+ep bin/clevo-daemon\n"
-                    "\n"
-                    "2. Systemd Service (Background):\n"
-                    "   sudo cp systemd/clevo-daemon.service /etc/systemd/system/\n"
-                    "   sudo systemctl enable clevo-daemon.service\n"
-                    "\n"
-                    "3. Traditional setuid:\n"
-                    "   sudo chown root bin/clevo-daemon\n"
-                    "   sudo chmod u+s bin/clevo-daemon\n"
-                    "\n"
-                    "Note any fan duty change should take 1-2 seconds to come into effect.\n"
-                    "\n"
-                );
-                exit(EXIT_SUCCESS);
-            case 0x100: // --max-increase-rate
+                
+            case 'M':
                 max_duty_increase_rate = atoi(optarg);
                 if (max_duty_increase_rate < 1 || max_duty_increase_rate > 100) {
-                    printf("Invalid max increase rate: %d (must be 1-100%%)\n", max_duty_increase_rate);
+                    fprintf(stderr, "Error: Max duty increase rate must be between 1 and 100%%\n");
                     exit(EXIT_FAILURE);
                 }
                 break;
-            case 0x101: // --max-decrease-rate
+                
+            case 'N':
                 max_duty_decrease_rate = atoi(optarg);
                 if (max_duty_decrease_rate < 1 || max_duty_decrease_rate > 100) {
-                    printf("Invalid max decrease rate: %d (must be 1-100%%)\n", max_duty_decrease_rate);
+                    fprintf(stderr, "Error: Max duty decrease rate must be between 1 and 100%%\n");
                     exit(EXIT_FAILURE);
                 }
                 break;
-            case 'q':
-                quiet_mode = 1;
-                log_level = LOG_ERR;
+                
+            case 'p':
+                show_privilege_help();
+                exit(EXIT_SUCCESS);
                 break;
-            case 0x200: // --log-level
-                if (strcmp(optarg, "error") == 0) {
-                    log_level = LOG_ERR;
-                } else if (strcmp(optarg, "warning") == 0) {
-                    log_level = LOG_WARNING;
-                } else if (strcmp(optarg, "info") == 0) {
-                    log_level = LOG_INFO;
-                } else if (strcmp(optarg, "debug") == 0) {
-                    log_level = LOG_DEBUG;
-                } else {
-                    printf("Invalid log level: %s (must be error, warning, info, or debug)\n", optarg);
-                    exit(EXIT_FAILURE);
-                }
-                break;
-            default:
-                printf("Unknown option: %c\n", c);
+                
+            case '?':
                 exit(EXIT_FAILURE);
+                break;
+                
+            default:
+                abort();
         }
     }
 }
