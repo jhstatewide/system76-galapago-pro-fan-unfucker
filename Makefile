@@ -2,7 +2,7 @@ vpath %.c ../src
 
 CC = gcc
 CFLAGS = -c -Wall -std=gnu99 -DHAVE_LIBCAP
-LDFLAGS = -lcap
+LDFLAGS = -lcap -lncurses
 
 DSTDIR := /usr/local
 OPT_DIR := /opt/galago-pro-fan-control-daemon
@@ -11,7 +11,7 @@ SRCDIR := src
 
 # Original monolithic source files
 SRC = clevo-indicator.c privilege_manager.c
-DAEMON_SRC = clevo-daemon.c clevo-daemon-socket.c clevo-daemon-dbus.c privilege_manager.c logging.c utils.c fan_health.c ec_interface.c
+DAEMON_SRC = clevo-daemon.c clevo-daemon-socket.c clevo-daemon-dbus.c privilege_manager.c logging.c utils.c fan_health.c ec_interface.c live_stats.c
 CLIENT_SRC = clevo-client.c
 DBUS_CLIENT_SRC = clevo-dbus-client.c
 DIAG_SRC = ec_diagnostic.c

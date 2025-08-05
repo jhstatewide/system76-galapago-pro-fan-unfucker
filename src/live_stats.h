@@ -1,17 +1,46 @@
+/*
+ ============================================================================
+ Name        : live_stats.h
+ Description : Live statistics display module for Clevo fan control daemon
+
+ This module provides a ncurses-based real-time display of fan control
+ statistics including temperature, fan duty, RPM, and PID status.
+
+ ============================================================================
+ */
+
 #ifndef LIVE_STATS_H
 #define LIVE_STATS_H
 
 #include <ncurses.h>
+#include <stdbool.h>
 
-/**
- * Live stats display structure
- */
+// Share info structure (matches the one in clevo-daemon.c)
+typedef struct {
+    volatile int exit;
+    volatile int cpu_temp;
+    volatile int fan_duty;
+    volatile int fan_rpms;
+    volatile int auto_duty;
+    volatile int auto_duty_val;
+    volatile int manual_next_fan_duty;
+    volatile int manual_prev_fan_duty;
+} share_info_t;
+
+// Configuration structure for live stats
+typedef struct {
+    bool enabled;
+    double update_interval;
+    bool debug_mode;
+    int target_temperature;
+    bool pid_enabled;
+    const char* version;
+} live_stats_config_t;
+
+// Live stats state structure
 typedef struct {
     WINDOW* window;
-    int initialized;
-    double update_interval;
-    
-    // Display cache for optimization
+    bool initialized;
     int last_display_cpu_temp;
     int last_display_fan_duty;
     int last_display_fan_rpm;
@@ -19,78 +48,25 @@ typedef struct {
     double last_display_pid_p;
     double last_display_pid_i;
     double last_display_pid_d;
-    
-    // Debug log buffer
-    char debug_log_buffer[10][256];
-    int debug_log_index;
-    int debug_log_count;
-    
-    // Display dimensions
-    int max_y;
-    int max_x;
-} live_stats_t;
+} live_stats_state_t;
 
-/**
- * Initialize live stats display
- * @param update_interval Update interval in seconds
- * @return Pointer to live stats structure, NULL on failure
- */
-live_stats_t* live_stats_init(double update_interval);
+// Function declarations
+void live_stats_init(live_stats_config_t* config);
+void live_stats_display(share_info_t* share_info, live_stats_config_t* config);
+void live_stats_cleanup(void);
+void live_stats_handle_resize(void);
+void live_stats_handle_input(volatile int* running, bool debug_mode);
 
-/**
- * Display live statistics
- * @param stats Live stats structure
- * @param cpu_temp Current CPU temperature
- * @param fan_duty Current fan duty cycle
- * @param fan_rpm Current fan RPM
- * @param target_temp Target temperature
- * @param pid_enabled PID control enabled flag
- * @param pid_error PID error value
- * @param pid_p PID proportional term
- * @param pid_i PID integral term
- * @param pid_d PID derivative term
- * @param auto_duty Auto duty mode flag
- * @param stuck_detected Temperature stuck detection flag
- * @param recovery_attempts Fan recovery attempts
- * @param max_recovery_attempts Maximum recovery attempts
- * @param debug_mode Debug mode flag
- */
-void live_stats_display(live_stats_t* stats, int cpu_temp, int fan_duty, int fan_rpm,
-                       int target_temp, bool pid_enabled, double pid_error, double pid_p,
-                       double pid_i, double pid_d, bool auto_duty, bool stuck_detected,
-                       int recovery_attempts, int max_recovery_attempts, bool debug_mode);
+// Configuration functions
+void live_stats_set_enabled(bool enabled);
+void live_stats_set_interval(double interval);
+void live_stats_set_debug_mode(bool debug_mode);
+void live_stats_set_target_temperature(int temp);
+void live_stats_set_pid_enabled(bool enabled);
+void live_stats_set_version(const char* version);
 
-/**
- * Handle window resize
- * @param stats Live stats structure
- */
-void live_stats_handle_resize(live_stats_t* stats);
-
-/**
- * Handle user input
- * @param stats Live stats structure
- * @return true if should quit, false to continue
- */
-bool live_stats_handle_input(live_stats_t* stats);
-
-/**
- * Add debug log message
- * @param stats Live stats structure
- * @param message Debug message
- */
-void live_stats_add_debug_log(live_stats_t* stats, const char* message);
-
-/**
- * Check if live stats is initialized
- * @param stats Live stats structure
- * @return true if initialized, false otherwise
- */
-bool live_stats_is_initialized(live_stats_t* stats);
-
-/**
- * Clean up live stats display
- * @param stats Live stats structure
- */
-void live_stats_cleanup(live_stats_t* stats);
+// Utility functions
+bool live_stats_is_initialized(void);
+bool live_stats_is_enabled(void);
 
 #endif // LIVE_STATS_H 
