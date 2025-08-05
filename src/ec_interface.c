@@ -54,6 +54,41 @@ int ec_write_fan_duty(int duty_percentage) {
     return ec_io_do(0x99, 0x01, v_i);
 }
 
+int ec_write_fan_duty_with_retry(int duty_percentage, int max_retries) {
+    if (duty_percentage < 1 || duty_percentage > 100) {
+        logging_error("Invalid fan duty to write: %d", duty_percentage);
+        return -1;
+    }
+    
+    double v_d = ((double) duty_percentage) / 100.0 * 255.0;
+    int v_i = (int) v_d;
+    
+    // Use the standard ec_io_do function with multiple attempts
+    for (int attempt = 0; attempt < max_retries; attempt++) {
+        int result = ec_io_do(0x99, 0x01, v_i);
+        if (result == 0) {
+            if (attempt > 0) {
+                logging_debug("Fan duty write succeeded on retry %d/%d: %d%% (raw: %d)", 
+                             attempt + 1, max_retries, duty_percentage, v_i);
+            }
+            return 0;
+        }
+        
+        logging_debug("Fan duty write attempt %d/%d failed: %d%% (raw: %d)", 
+                     attempt + 1, max_retries, duty_percentage, v_i);
+        
+        if (attempt < max_retries - 1) {
+            // Wait before next retry with exponential backoff
+            int retry_delay_ms = (1 << attempt) * 5;  // 5ms, 10ms, 20ms...
+            usleep(retry_delay_ms * 1000);
+        }
+    }
+    
+    logging_error("Fan duty write failed after %d retries: %d%% (raw: %d)", 
+                 max_retries, duty_percentage, v_i);
+    return -1;
+}
+
 int ec_test_fan(int duty_percentage) {
     logging_info("Testing fan duty: %d%%", duty_percentage);
     int result = ec_write_fan_duty(duty_percentage);
@@ -80,17 +115,19 @@ void ec_cleanup(void) {
 static int ec_io_wait(const uint32_t port, const uint32_t flag, const char value) {
     uint8_t data = inb(port);
     int i = 0;
-    while ((((data >> flag) & 0x1) != value) && (i++ < 100)) {
+    while ((((data >> flag) & 0x1) != value) && (i++ < 500)) {  // Increased from 100 to 500
         usleep(1000);
         data = inb(port);
     }
-    if (i >= 100) {
+    if (i >= 500) {  // Updated timeout check
         logging_error("EC I/O wait error on port 0x%x, data=0x%x, flag=0x%x, value=0x%x",
                 port, data, flag, value);
         return -1;
     }
     return 0;
 }
+
+
 
 static uint8_t ec_io_read(const uint32_t port) {
     ec_io_wait(EC_SC, IBF, 0);
@@ -105,6 +142,8 @@ static uint8_t ec_io_read(const uint32_t port) {
     return value;
 }
 
+
+
 static int ec_io_do(const uint32_t cmd, const uint32_t port, const uint8_t value) {
     ec_io_wait(EC_SC, IBF, 0);
     outb(cmd, EC_SC);
@@ -117,6 +156,8 @@ static int ec_io_do(const uint32_t cmd, const uint32_t port, const uint8_t value
 
     return ec_io_wait(EC_SC, IBF, 0);
 }
+
+
 
 static int calculate_fan_duty(int raw_duty) {
     return (int) ((double) raw_duty / 255.0 * 100.0);

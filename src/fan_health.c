@@ -178,7 +178,7 @@ int fan_health_check(fan_health_monitor_t* monitor, int current_duty, int curren
         }
         logging_ec_register_dump(ec_registers, 256);
         
-        ec_write_fan_duty(monitor->emergency_duty);  // Immediately boost fan
+        ec_write_fan_duty_with_retry(monitor->emergency_duty, 3);  // Immediately boost fan with retry
         fan_health_attempt_recovery(monitor);  // Try recovery procedure
         monitor->low_rpm_count = 0;  // Reset counter after emergency response
         return -1;
@@ -202,7 +202,7 @@ int fan_health_check(fan_health_monitor_t* monitor, int current_duty, int curren
                               new_duty, FAN_MIN_RPM, min_duty_for_min_rpm);
                 new_duty = min_duty_for_min_rpm;
             }
-            ec_write_fan_duty(new_duty);
+            ec_write_fan_duty_with_retry(new_duty, 3);
             logging_info("Increasing fan duty to %d%% to maintain safe RPM", new_duty);
             
             if (monitor->low_rpm_count >= 4) {  // If problem persists, try recovery
@@ -249,7 +249,7 @@ int fan_health_attempt_recovery(fan_health_monitor_t* monitor) {
         logging_info("Recovery step %d/%d: Setting fan to %d%%", 
                   i + 1, num_duties, duty);
         
-        ec_write_fan_duty(duty);
+        ec_write_fan_duty_with_retry(duty, 3);
         usleep(800000);  // Wait longer (800ms) between changes
         
         // Check if fan responded
@@ -270,12 +270,12 @@ int fan_health_attempt_recovery(fan_health_monitor_t* monitor) {
             
             // Gradually step down to ensure stability
             for (int step = 90; step >= 15; step -= 10) {
-                ec_write_fan_duty(step);
+                ec_write_fan_duty_with_retry(step, 3);
                 usleep(500000);
                 rpm_after = ec_query_fan_rpms();
                 if (rpm_after < monitor->safe_fan_rpm) {
                     // If RPM drops too low during step-down, go back to higher duty
-                    ec_write_fan_duty(step + 20);
+                    ec_write_fan_duty_with_retry(step + 20, 3);
                     logging_info("Maintaining higher duty (%d%%) for stability", step + 20);
                     return 0;
                 }
@@ -285,7 +285,7 @@ int fan_health_attempt_recovery(fan_health_monitor_t* monitor) {
     }
     
     // If we get here, try one last emergency measure
-    ec_write_fan_duty(100);
+            ec_write_fan_duty_with_retry(100, 3);
     logging_error("Fan recovery failed - setting to full speed for safety");
     return -1;
 }

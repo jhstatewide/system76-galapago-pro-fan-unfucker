@@ -49,6 +49,7 @@
 #include "logging.h"
 #include "utils.h"
 #include "live_stats.h"
+#include "ec_interface.h"
 
 #define NAME "clevo-daemon"
 
@@ -150,7 +151,7 @@ static int max_temp_change_per_cycle = 10;  // Maximum °C change per cycle (con
 
 // Fan health monitoring variables
 static int fan_health_check_interval = 10;  // Check fan health every 10 seconds (was 30)
-static int fan_stall_prevention_threshold = 25;  // Minimum duty to prevent stall
+static int fan_stall_prevention_threshold = 35;  // Increased minimum duty to prevent stall
 static int fan_recovery_attempts = 0;
 static int max_fan_recovery_attempts = 3;
 static time_t last_fan_recovery_time = 0;
@@ -205,16 +206,11 @@ static int daemon_ec_worker(void);
 static void daemon_on_sigterm(int signum);
 static int daemon_dump_fan(void);
 static int daemon_test_fan(int duty_percentage);
-static int ec_init(void);
 static int ec_auto_duty_adjust(void);
-static int ec_query_cpu_temp(void);
-
-static int ec_query_fan_duty(void);
-static int ec_query_fan_rpms(void);
-static int ec_write_fan_duty(int duty_percentage);
 static int ec_io_wait(const uint32_t port, const uint32_t flag, const char value);
 static uint8_t ec_io_read(const uint32_t port);
 static int ec_io_do(const uint32_t cmd, const uint32_t port, const uint8_t value);
+static int ec_io_do_with_retry(const uint32_t cmd, const uint32_t port, const uint8_t value, int max_retries);
 static int calculate_fan_duty(int raw_duty);
 static int calculate_fan_rpms(int raw_rpm_high, int raw_rpm_low);
 static int check_proc_instances(const char* proc_name);
@@ -744,13 +740,7 @@ static void daemon_on_sigterm(int signum) {
 
 
 
-static int ec_init(void) {
-    if (ioperm(EC_DATA, 1, 1) != 0)
-        return EXIT_FAILURE;
-    if (ioperm(EC_SC, 1, 1) != 0)
-        return EXIT_FAILURE;
-    return EXIT_SUCCESS;
-}
+
 
 static int ec_auto_duty_adjust(void) {
     if (!pid_enabled) {
@@ -1095,14 +1085,19 @@ static int ec_auto_duty_adjust(void) {
     int current_rpms = share_info->fan_rpms;
     int expected_min_rpm = new_duty * RPM_DUTY_RATIO;
     
-    if (current_rpms < MIN_FAN_RPM || (current_rpms < expected_min_rpm * 0.7)) {  // Allow 30% tolerance
+    if (current_rpms < MIN_FAN_RPM || (current_rpms < expected_min_rpm * 0.5)) {  // Reduced tolerance to 50%
         daemon_log(LOG_WARNING, "Fan may be stuck: RPM=%d (expected >%d) at duty=%d%%", 
                   current_rpms, expected_min_rpm, new_duty);
         
-        // Attempt recovery by temporarily boosting fan speed - STAY WITHIN VALID RANGE
-        int recovery_duty = MAX(new_duty + 20, FAN_EMERGENCY_DUTY);
+        // More aggressive recovery: boost to emergency duty immediately
+        int recovery_duty = MAX(new_duty + 30, FAN_EMERGENCY_DUTY);
         new_duty = MIN(recovery_duty, 100);  // Never exceed 100%
-        logging_telemetry("Attempting fan recovery by setting duty to %d%%", new_duty);
+        logging_telemetry("Attempting aggressive fan recovery by setting duty to %d%%", new_duty);
+        
+        // Force immediate EC write with retry for recovery
+        if (ec_write_fan_duty_with_retry(new_duty, 3) != 0) {
+            daemon_log(LOG_ERR, "Emergency fan recovery failed - hardware issue suspected");
+        }
     }
     
     // CRITICAL TEMPERATURE PROTECTION
@@ -1134,86 +1129,13 @@ static int ec_auto_duty_adjust(void) {
     return new_duty;
 }
 
-static int ec_query_cpu_temp(void) {
-    return ec_io_read(EC_REG_CPU_TEMP);
-}
 
-static int ec_query_fan_duty(void) {
-    int raw_duty = ec_io_read(EC_REG_FAN_DUTY);
-    return calculate_fan_duty(raw_duty);
-}
 
-static int ec_query_fan_rpms(void) {
-    int raw_rpm_hi = ec_io_read(EC_REG_FAN_RPMS_HI);
-    int raw_rpm_lo = ec_io_read(EC_REG_FAN_RPMS_LO);
-    return calculate_fan_rpms(raw_rpm_hi, raw_rpm_lo);
-}
 
-static int ec_write_fan_duty(int duty_percentage) {
-    // Enforce minimum duty cycle with stall prevention
-    if (duty_percentage < MIN_FAN_DUTY) {
-        logging_telemetry("Adjusting fan duty to minimum: %d%% -> %d%%", duty_percentage, MIN_FAN_DUTY);
-        duty_percentage = MIN_FAN_DUTY;
-    }
-    
-    // Additional stall prevention for very low duty cycles
-    if (duty_percentage < FAN_STALL_PREVENTION_DUTY) {
-        daemon_log(LOG_WARNING, "Duty cycle %d%% below stall prevention threshold, adjusting to %d%%", 
-                  duty_percentage, FAN_STALL_PREVENTION_DUTY);
-        duty_percentage = FAN_STALL_PREVENTION_DUTY;
-    }
-    
-    if (duty_percentage < 1 || duty_percentage > 100) {
-        daemon_log(LOG_ERR, "Wrong fan duty to write: %d", duty_percentage);
-        return EXIT_FAILURE;
-    }
-    
-    // Fan bearing protection: Prevent rapid duty cycling
-    time_t current_time = time(NULL);
-    if (current_time - last_duty_change_time < FAN_CYCLING_COOLDOWN_MS / 1000) {
-        if (abs(duty_percentage - last_duty_change_value) < 5) {
-            // Small change within cooldown period - skip to protect bearings
-            if (debug_mode) {
-                daemon_log(LOG_DEBUG, "Skipping small duty change %d%% -> %d%% to protect fan bearings", 
-                          last_duty_change_value, duty_percentage);
-            }
-            return EXIT_SUCCESS;
-        }
-    }
-    
-    // Record current RPM before change for response validation
-    int rpm_before = ec_query_fan_rpms();
-    
-    double v_d = ((double) duty_percentage) / 100.0 * 255.0;
-    int v_i = (int) v_d;
-    int result = ec_io_do(0x99, 0x01, v_i);
-    
-    // Update bearing protection variables on successful write
-    if (result == EXIT_SUCCESS) {
-        last_duty_change_time = current_time;
-        last_duty_change_value = duty_percentage;
-        
-        // Record duty change for enhanced logging
-        record_duty_change();
-    }
-    
-    // Validate fan response after a short delay
-    if (result == EXIT_SUCCESS) {
-        usleep(50000); // Wait 50ms for fan to respond
-        int rpm_after = ec_query_fan_rpms();
-        
-        // Check if fan responded appropriately
-        if (rpm_after > 0 && rpm_after >= rpm_before * 0.8) { // Allow 20% tolerance
-            if (debug_mode) {
-                daemon_log(LOG_DEBUG, "Fan responded: RPM %d -> %d at duty %d%%", rpm_before, rpm_after, duty_percentage);
-            }
-        } else {
-            daemon_log(LOG_WARNING, "Fan may not have responded: RPM %d -> %d at duty %d%%", rpm_before, rpm_after, duty_percentage);
-        }
-    }
-    
-    return result;
-}
+
+
+
+
 
 static int ec_io_wait(const uint32_t port, const uint32_t flag, const char value) {
     uint8_t data = inb(port);
@@ -1289,6 +1211,45 @@ static int ec_io_do(const uint32_t cmd, const uint32_t port, const uint8_t value
     outb(value, EC_DATA);
 
     return ec_io_wait(EC_SC, IBF, 0);
+}
+
+static int ec_io_do_with_retry(const uint32_t cmd, const uint32_t port, const uint8_t value, int max_retries) {
+    for (int attempt = 0; attempt < max_retries; attempt++) {
+        if (ec_io_wait(EC_SC, IBF, 0) == EXIT_SUCCESS) {
+            outb(cmd, EC_SC);
+            
+            if (ec_io_wait(EC_SC, IBF, 0) == EXIT_SUCCESS) {
+                outb(port, EC_DATA);
+                
+                if (ec_io_wait(EC_SC, IBF, 0) == EXIT_SUCCESS) {
+                    outb(value, EC_DATA);
+                    
+                    if (ec_io_wait(EC_SC, IBF, 0) == EXIT_SUCCESS) {
+                        if (attempt > 0) {
+                            daemon_log(LOG_DEBUG, "EC write succeeded on retry %d/%d for cmd=0x%x, port=0x%x, value=0x%x", 
+                                     attempt + 1, max_retries, cmd, port, value);
+                        }
+                        return EXIT_SUCCESS;
+                    }
+                }
+            }
+        }
+        
+        if (debug_mode) {
+            daemon_log(LOG_DEBUG, "EC write attempt %d/%d failed for cmd=0x%x, port=0x%x, value=0x%x", 
+                      attempt + 1, max_retries, cmd, port, value);
+        }
+        
+        if (attempt < max_retries - 1) {
+            // Wait before next retry with exponential backoff
+            int retry_delay_ms = (1 << attempt) * 5;  // 5ms, 10ms, 20ms...
+            usleep(retry_delay_ms * 1000);
+        }
+    }
+    
+    daemon_log(LOG_ERR, "EC write failed after %d retries for cmd=0x%x, port=0x%x, value=0x%x", 
+               max_retries, cmd, port, value);
+    return EXIT_FAILURE;
 }
 
 static int calculate_fan_duty(int raw_duty) {

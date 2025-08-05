@@ -49,6 +49,14 @@ int ec_query_fan_rpms(void);
 int ec_write_fan_duty(int duty_percentage);
 
 /**
+ * Write fan duty cycle to EC with retry logic and exponential backoff
+ * @param duty_percentage Fan duty cycle (1-100)
+ * @param max_retries Maximum number of retry attempts (default: 3)
+ * @return 0 on success, -1 on failure
+ */
+int ec_write_fan_duty_with_retry(int duty_percentage, int max_retries);
+
+/**
  * Test fan by setting duty cycle and reading back
  * @param duty_percentage Fan duty cycle to test
  * @return 0 on success, -1 on failure

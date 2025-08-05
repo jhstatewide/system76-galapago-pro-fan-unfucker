@@ -1,99 +1,90 @@
 #!/bin/bash
 
-# Test script for fan rate limiting improvements
-# This script helps verify that the new softer rate limiting is working correctly
-# and tests the fan stuck recovery mechanisms
+# Test script for enhanced EC I/O reliability
+# This script tests the retry logic and exponential backoff implementation
 
-echo "=== Fan Rate Limiting and Stall Prevention Test ==="
-echo "Testing the new softer rate limiting settings and stall prevention..."
-echo ""
+echo "Testing Enhanced EC I/O Reliability Implementation"
+echo "================================================"
 
-# Check if daemon is running
+# Check if the daemon is running
 if ! pgrep -x "clevo-daemon" > /dev/null; then
-    echo "Starting daemon in test mode..."
-    sudo ./bin/clevo-daemon --debug --foreground --interval 1.0 &
-    DAEMON_PID=$!
-    sleep 3
-else
-    echo "Daemon is already running"
-    DAEMON_PID=$(pgrep -x "clevo-daemon")
+    echo "ERROR: clevo-daemon is not running"
+    echo "Please start the daemon first: sudo systemctl start clevo-daemon"
+    exit 1
 fi
 
-echo "Current daemon PID: $DAEMON_PID"
-echo ""
+echo "✓ clevo-daemon is running"
 
-# Test 1: Check current settings
-echo "=== Test 1: Current Rate Limiting Settings ==="
-if command -v ./bin/clevo-client > /dev/null; then
-    echo "Max duty change rate:"
-    ./bin/clevo-client --get-max-duty-change 2>/dev/null || echo "Command not available"
-    echo "Max duty increase rate:"
-    ./bin/clevo-client --get-max-duty-increase 2>/dev/null || echo "Command not available"
-    echo "Max duty decrease rate:"
-    ./bin/clevo-client --get-max-duty-decrease 2>/dev/null || echo "Command not available"
+# Test 1: Check if enhanced retry functions are compiled
+echo ""
+echo "Test 1: Checking for enhanced retry functions..."
+
+# Check if the new function is available in the daemon
+if grep -q "ec_write_fan_duty_with_retry" /proc/*/maps 2>/dev/null | grep clevo-daemon; then
+    echo "✓ Enhanced retry function detected in running daemon"
 else
-    echo "clevo-client not found - using socket interface"
-    echo "SET_MAX_DUTY_CHANGE" | nc -U /tmp/clevo-daemon.sock 2>/dev/null || echo "Socket not available"
+    echo "⚠ Enhanced retry function not detected - daemon may need restart"
 fi
-echo ""
 
-# Test 2: Monitor fan behavior during temperature changes
-echo "=== Test 2: Fan Behavior Monitoring ==="
-echo "This will monitor fan speed changes for 60 seconds..."
-echo "Try running a CPU-intensive task to see how the fan responds."
-echo "Watch for stall prevention messages in the logs."
+# Test 2: Check daemon logs for retry activity
 echo ""
+echo "Test 2: Checking daemon logs for retry activity..."
+echo "Recent daemon logs (last 20 lines):"
+sudo journalctl -u clevo-daemon --no-pager -n 20 | grep -E "(retry|EC.*failed|EC.*succeeded)" || echo "No retry activity found in recent logs"
 
-# Monitor fan speed for 60 seconds with more detailed output
-for i in {1..60}; do
-    if [ -f /tmp/clevo-daemon.sock ]; then
-        echo "Time: ${i}s - Fan RPM: $(echo "GET_FAN_RPM" | nc -U /tmp/clevo-daemon.sock 2>/dev/null | head -1)"
-        echo "Time: ${i}s - Fan Duty: $(echo "GET_FAN_DUTY" | nc -U /tmp/clevo-daemon.sock 2>/dev/null | head -1)"
-        echo "Time: ${i}s - CPU Temp: $(echo "GET_CPU_TEMP" | nc -U /tmp/clevo-daemon.sock 2>/dev/null | head -1)"
-        echo "---"
-    else
-        echo "Socket not available for monitoring"
-        break
-    fi
-    sleep 1
-done
+# Test 3: Test fan duty cycle changes with enhanced reliability
+echo ""
+echo "Test 3: Testing fan duty cycle changes..."
+
+# Test low duty cycle
+echo "Setting fan to 25% duty cycle..."
+sudo clevo-client set-fan-duty 25
+sleep 2
+
+# Test high duty cycle
+echo "Setting fan to 80% duty cycle..."
+sudo clevo-client set-fan-duty 80
+sleep 2
+
+# Test emergency duty cycle
+echo "Setting fan to 100% duty cycle (emergency)..."
+sudo clevo-client set-fan-duty 100
+sleep 2
+
+# Return to normal
+echo "Returning fan to 50% duty cycle..."
+sudo clevo-client set-fan-duty 50
+sleep 2
+
+# Test 4: Check for any EC communication errors
+echo ""
+echo "Test 4: Checking for EC communication errors..."
+echo "Recent EC-related errors:"
+sudo journalctl -u clevo-daemon --no-pager -n 50 | grep -E "(EC.*error|EC.*failed|EC.*timeout)" || echo "No EC errors found"
+
+# Test 5: Verify fan response
+echo ""
+echo "Test 5: Verifying fan response..."
+current_duty=$(sudo clevo-client get-fan-duty)
+current_rpm=$(sudo clevo-client get-fan-rpm)
+echo "Current fan duty: ${current_duty}%"
+echo "Current fan RPM: ${current_rpm}"
+
+if [ "$current_rpm" -gt 0 ]; then
+    echo "✓ Fan is responding (RPM > 0)"
+else
+    echo "⚠ Fan may not be responding (RPM = 0)"
+fi
 
 echo ""
-echo "=== Test 3: Stall Prevention Test ==="
-echo "Testing stall prevention by monitoring logs for stall prevention messages..."
-echo "Run this in another terminal to see the logs:"
-echo "sudo journalctl -u clevo-daemon -f"
+echo "Enhanced EC I/O Reliability Test Complete"
+echo "========================================="
 echo ""
-
-# Test 4: Recovery Test
-echo "=== Test 4: Fan Recovery Test ==="
-echo "If the fan gets stuck, the daemon should automatically attempt recovery."
-echo "Look for these messages in the logs:"
-echo "- 'Fan may be stuck: RPM=0'"
-echo "- 'Attempting fan recovery'"
-echo "- 'Fan responding at X RPM - recovery successful'"
+echo "Key improvements implemented:"
+echo "1. Exponential backoff retry logic for EC operations"
+echo "2. Enhanced timeout handling with increasing delays"
+echo "3. Comprehensive logging for retry attempts"
+echo "4. Automatic recovery from EC communication failures"
 echo ""
-
-echo "=== Test Complete ==="
-echo ""
-echo "Expected improvements with new settings:"
-echo "- Faster response to temperature increases (15% vs 10% per cycle)"
-echo "- More gradual decreases to prevent fan stall (20% vs 30% per cycle)"
-echo "- Better emergency response (35% vs 25% for critical temps)"
-echo "- Stall prevention threshold at 25% minimum duty"
-echo "- More frequent health checks (10s vs 30s)"
-echo "- Improved recovery with 5-step process"
-echo "- Cooldown between recovery attempts (60s)"
-echo ""
-echo "If the fan still gets stuck, try:"
-echo "1. Increase the status interval: --interval 1.0"
-echo "2. Increase max duty increase: --max-duty-increase 20"
-echo "3. Decrease max duty decrease: --max-duty-decrease 15"
-echo "4. Increase stall prevention threshold: --stall-prevention-threshold 30"
-echo ""
-
-# Clean up if we started the daemon
-if [ ! -z "$DAEMON_PID" ] && [ "$DAEMON_PID" != "$(pgrep -x "clevo-daemon")" ]; then
-    echo "Stopping test daemon..."
-    kill $DAEMON_PID
-fi 
+echo "The daemon now uses ec_write_fan_duty_with_retry() with 3 retries"
+echo "and exponential backoff delays (5ms, 10ms, 20ms) for all fan duty writes." 

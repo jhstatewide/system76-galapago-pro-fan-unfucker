@@ -140,12 +140,12 @@ int temperature_monitor_sanitize_reading(temperature_monitor_t* monitor,
                       invalid_reading_count);
         
         // Try to "reset" the EC by cycling fan speeds
-        ec_write_fan_duty(100); // Full speed
+        ec_write_fan_duty_with_retry(100, 3); // Full speed with retry
         usleep(500000);         // Wait 500ms
         
         // Use minimum duty that ensures minimum RPM
         int min_duty_for_min_rpm = (FAN_MIN_RPM + FAN_RPM_DUTY_RATIO - 1) / FAN_RPM_DUTY_RATIO; // Ceiling division
-        ec_write_fan_duty(min_duty_for_min_rpm);  // Low speed but above minimum RPM
+        ec_write_fan_duty_with_retry(min_duty_for_min_rpm, 3);  // Low speed but above minimum RPM with retry
         usleep(500000);         // Wait 500ms
         
         // Re-read temperature after reset attempt
