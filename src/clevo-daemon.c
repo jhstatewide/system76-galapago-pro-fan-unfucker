@@ -197,6 +197,15 @@ static struct {
     int consecutive_zero_rpm;
     int last_recovery_success;
     time_t last_stall_detection;
+    
+    // Enhanced cooldown system
+    time_t last_recovery_time;
+    time_t last_duty_change_time;
+    int cooldown_state;  // 0=normal, 1=post_recovery, 2=stall_prevention
+    int cooldown_duration;  // seconds
+    int stable_duty;  // duty cycle to maintain during cooldown
+    int cooldown_phase;  // 0=initial, 1=stabilization, 2=gradual_return
+    time_t phase_start_time;
 } fan_health = {0};
 
 // Function declarations
@@ -227,6 +236,10 @@ static void daemon_log(int priority, const char* format, ...);
 static void daemonize(void);
 static void check_fan_health(void);
 static int attempt_fan_recovery(void);
+static void enter_cooldown_state(int state, int duration, int stable_duty);
+static bool is_in_cooldown(void);
+static void update_cooldown_state(void);
+static int get_cooldown_adjusted_duty(int requested_duty);
 
 // Alternative temperature reading functions
 static int read_temp_from_sysfs(const char* path);
@@ -644,12 +657,21 @@ static int daemon_ec_worker(void) {
         bool emergency_mode = (temp >= target_temperature + 10) || (temp >= target_temperature + 5 && next_duty >= 80);
         
         if (next_duty != 0 && (next_duty != share_info->auto_duty_val || emergency_mode)) {
+            // Apply cooldown adjustments to prevent stalls
+            int adjusted_duty = get_cooldown_adjusted_duty(next_duty);
+            
             char s_time[256];
             get_time_string(s_time, 256, "%m/%d %H:%M:%S");
-                            logging_telemetry("%s CPU=%d°C, auto fan duty to %d%%", s_time, share_info->cpu_temp, next_duty);
-            int write_result = ec_write_fan_duty(next_duty);
+            if (adjusted_duty != next_duty) {
+                logging_telemetry("%s CPU=%d°C, auto fan duty adjusted from %d%% to %d%% (cooldown)", 
+                                s_time, share_info->cpu_temp, next_duty, adjusted_duty);
+            } else {
+                logging_telemetry("%s CPU=%d°C, auto fan duty to %d%%", s_time, share_info->cpu_temp, next_duty);
+            }
+            
+            int write_result = ec_write_fan_duty(adjusted_duty);
             if (debug_mode) daemon_log(LOG_DEBUG, "ec_write_fan_duty (auto) returned: %d", write_result);
-            share_info->auto_duty_val = next_duty;
+            share_info->auto_duty_val = adjusted_duty;
             __sync_synchronize(); // Ensure changes are visible to other processes
         }
     } else {
@@ -660,12 +682,21 @@ static int daemon_ec_worker(void) {
             
             // Validate duty cycle before writing
             if (manual_duty >= 1 && manual_duty <= 100) {
+                // Apply cooldown adjustments to prevent stalls
+                int adjusted_duty = get_cooldown_adjusted_duty(manual_duty);
+                
                 char s_time[256];
                 get_time_string(s_time, 256, "%m/%d %H:%M:%S");
-                logging_telemetry("%s Manual fan duty to %d%%", s_time, manual_duty);
-                int write_result = ec_write_fan_duty(manual_duty);
+                if (adjusted_duty != manual_duty) {
+                    logging_telemetry("%s Manual fan duty adjusted from %d%% to %d%% (cooldown)", 
+                                    s_time, manual_duty, adjusted_duty);
+                } else {
+                    logging_telemetry("%s Manual fan duty to %d%%", s_time, manual_duty);
+                }
+                
+                int write_result = ec_write_fan_duty(adjusted_duty);
                 if (debug_mode) daemon_log(LOG_DEBUG, "ec_write_fan_duty (manual) returned: %d", write_result);
-                share_info->manual_prev_fan_duty = manual_duty;
+                share_info->manual_prev_fan_duty = adjusted_duty;
                 share_info->manual_next_fan_duty = 0; // Clear the request
                 __sync_synchronize(); // Ensure changes are visible to other processes
             } else {
@@ -1679,14 +1710,93 @@ static void adaptive_pid_tune_parameters(void) {
     }
 }
 
+// Enhanced cooldown system functions
+static void enter_cooldown_state(int state, int duration, int stable_duty) {
+    time_t current_time = time(NULL);
+    fan_health.cooldown_state = state;
+    fan_health.cooldown_duration = duration;
+    fan_health.stable_duty = stable_duty;
+    fan_health.cooldown_phase = 0;  // Start with initial phase
+    fan_health.phase_start_time = current_time;
+    fan_health.last_recovery_time = current_time;
+    
+    const char* state_names[] = {"NORMAL", "POST_RECOVERY", "STALL_PREVENTION"};
+    daemon_log(LOG_INFO, "Entering cooldown state: %s for %d seconds, stable_duty=%d%%", 
+               state_names[state], duration, stable_duty);
+}
 
+static bool is_in_cooldown(void) {
+    return fan_health.cooldown_state != 0;
+}
 
+static void update_cooldown_state(void) {
+    if (!is_in_cooldown()) return;
+    
+    time_t current_time = time(NULL);
+    time_t elapsed = current_time - fan_health.phase_start_time;
+    
+    switch (fan_health.cooldown_state) {
+        case 1: // POST_RECOVERY
+            if (elapsed >= fan_health.cooldown_duration) {
+                // Transition to normal state
+                fan_health.cooldown_state = 0;
+                daemon_log(LOG_INFO, "Post-recovery cooldown completed, returning to normal control");
+            } else {
+                // Maintain stable duty during cooldown
+                if (share_info->fan_duty != fan_health.stable_duty) {
+                    ec_write_fan_duty(fan_health.stable_duty);
+                    daemon_log(LOG_DEBUG, "Maintaining stable duty %d%% during post-recovery cooldown (%d seconds remaining)", 
+                              fan_health.stable_duty, fan_health.cooldown_duration - elapsed);
+                }
+            }
+            break;
+            
+        case 2: // STALL_PREVENTION
+            if (elapsed >= fan_health.cooldown_duration) {
+                // Transition to normal state
+                fan_health.cooldown_state = 0;
+                daemon_log(LOG_INFO, "Stall prevention cooldown completed, returning to normal control");
+            } else {
+                // Maintain stable duty during cooldown
+                if (share_info->fan_duty != fan_health.stable_duty) {
+                    ec_write_fan_duty(fan_health.stable_duty);
+                    daemon_log(LOG_DEBUG, "Maintaining stable duty %d%% during stall prevention cooldown (%d seconds remaining)", 
+                              fan_health.stable_duty, fan_health.cooldown_duration - elapsed);
+                }
+            }
+            break;
+    }
+}
 
+static int get_cooldown_adjusted_duty(int requested_duty) {
+    if (!is_in_cooldown()) {
+        return requested_duty;  // No adjustment needed
+    }
+    
+    // During cooldown, limit duty changes to prevent stalls
+    int current_duty = share_info->fan_duty;
+    int max_change = 5;  // Maximum 5% change during cooldown
+    
+    if (requested_duty > current_duty + max_change) {
+        daemon_log(LOG_DEBUG, "Cooldown: limiting duty increase from %d%% to %d%%", 
+                   requested_duty, current_duty + max_change);
+        return current_duty + max_change;
+    } else if (requested_duty < current_duty - max_change) {
+        daemon_log(LOG_DEBUG, "Cooldown: limiting duty decrease from %d%% to %d%%", 
+                   requested_duty, current_duty - max_change);
+        return current_duty - max_change;
+    }
+    
+    return requested_duty;
+}
 
 static void check_fan_health(void) {
     time_t current_time = time(NULL);
     int current_duty = share_info->fan_duty;
     int current_rpm = share_info->fan_rpms;
+    
+    // Update cooldown state
+    update_cooldown_state();
     
     // Only check every 10 seconds
     if (current_time - fan_health.last_check_time < 10) {
@@ -1731,6 +1841,8 @@ static void check_fan_health(void) {
                 if (new_rpm > 0) {
                     logging_telemetry("Fan may not have responded: RPM 0 -> %d at duty 60%%", new_rpm);
                     fan_health.last_recovery_success = 1;
+                    // Enter post-recovery cooldown to prevent immediate re-stall
+                    enter_cooldown_state(1, 30, 60);  // 30 seconds cooldown at 60% duty
                 } else {
                     daemon_log(LOG_WARNING, "Fan still not responding, will try full recovery");
                     attempt_fan_recovery();
@@ -1765,6 +1877,8 @@ static void check_fan_health(void) {
             if (new_rpm > expected_min_rpm * 0.5) {  // If RPM improved significantly
                 logging_telemetry("Fan recovery successful: RPM %d -> %d at duty 25%%", current_rpm, new_rpm);
                 fan_health.last_recovery_success = 1;
+                // Enter post-recovery cooldown to prevent immediate re-stall
+                enter_cooldown_state(1, 30, 25);  // 30 seconds cooldown at 25% duty
             } else {
                 daemon_log(LOG_WARNING, "Fan still stuck at low RPM (%d), will try full recovery", new_rpm);
                 attempt_fan_recovery();
@@ -1780,6 +1894,11 @@ static void check_fan_health(void) {
         daemon_log(LOG_ERR, "CRITICAL: Fan RPM (%d) below minimum threshold (%d)", current_rpm, MIN_FAN_RPM);
         ec_write_fan_duty(EMERGENCY_DUTY);  // Immediately boost fan
         fan_health.low_rpm_count = 0;  // Reset counter after emergency response
+        
+        // Enter stall prevention cooldown to stabilize the fan
+        if (!is_in_cooldown()) {
+            enter_cooldown_state(2, 20, EMERGENCY_DUTY);  // 20 seconds cooldown at emergency duty
+        }
     }
     // WARNING: Fan RPMs are below safe operating level
     else if (current_rpm < SAFE_FAN_RPM || (current_rpm < expected_min_rpm * 0.7)) {
@@ -1794,6 +1913,11 @@ static void check_fan_health(void) {
             new_duty = MIN(new_duty, 100);  // Never exceed 100%
             ec_write_fan_duty(new_duty);
             logging_telemetry("Increasing fan duty to %d%% to maintain safe RPM", new_duty);
+            
+            // Enter stall prevention cooldown if RPM is still low after duty increase
+            if (fan_health.low_rpm_count >= 3 && !is_in_cooldown()) {
+                enter_cooldown_state(2, 15, new_duty);  // 15 seconds cooldown at new duty
+            }
             
             if (fan_health.low_rpm_count >= 4) {  // If problem persists, try recovery
                 if (current_time - last_fan_recovery_time > fan_recovery_cooldown) {
@@ -1831,6 +1955,8 @@ static int attempt_fan_recovery(void) {
     int rpm = ec_query_fan_rpms();
     if (rpm > SAFE_FAN_RPM) {
         logging_telemetry("Fan responding at %d RPM - recovery successful", rpm);
+        // Enter post-recovery cooldown to prevent immediate re-stall
+        enter_cooldown_state(1, 45, 60);  // 45 seconds cooldown at 60% duty
         return EXIT_SUCCESS;
     }
     
@@ -1850,6 +1976,8 @@ static int attempt_fan_recovery(void) {
     rpm = ec_query_fan_rpms();
     if (rpm > SAFE_FAN_RPM) {
         daemon_log(LOG_INFO, "Fan responding at %d RPM - recovery successful", rpm);
+        // Enter post-recovery cooldown to prevent immediate re-stall
+        enter_cooldown_state(1, 45, 80);  // 45 seconds cooldown at 80% duty
         return EXIT_SUCCESS;
     }
     
@@ -1869,6 +1997,8 @@ static int attempt_fan_recovery(void) {
     rpm = ec_query_fan_rpms();
     if (rpm > SAFE_FAN_RPM) {
         daemon_log(LOG_INFO, "Fan responding at %d RPM - recovery successful", rpm);
+        // Enter post-recovery cooldown to prevent immediate re-stall
+        enter_cooldown_state(1, 45, 25);  // 45 seconds cooldown at 25% duty
         return EXIT_SUCCESS;
     }
     
@@ -1901,6 +2031,8 @@ static int attempt_fan_recovery(void) {
         rpm = ec_query_fan_rpms();
         if (rpm > SAFE_FAN_RPM) {
             logging_telemetry("Fan responding at %d RPM - recovery successful", rpm);
+            // Enter post-recovery cooldown to prevent immediate re-stall
+            enter_cooldown_state(1, 45, duty);  // 45 seconds cooldown at current duty
             return EXIT_SUCCESS;
         }
     }
