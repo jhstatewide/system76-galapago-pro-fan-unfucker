@@ -2,6 +2,9 @@
 #define LOGGING_H
 
 #include <syslog.h>
+#include <time.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 /**
  * Log levels
@@ -69,6 +72,72 @@ void logging_warning(const char* format, ...);
  * @param ... Variable arguments
  */
 void logging_error(const char* format, ...);
+
+/**
+ * Enhanced diagnostic logging functions
+ */
+
+/**
+ * Log hardware state during fan issues
+ * @param duty Current duty cycle
+ * @param rpm Current RPM
+ * @param expected_rpm Expected RPM for current duty
+ * @param cpu_temp CPU temperature
+ * @param system_load System load (if available)
+ */
+void logging_hardware_state(int duty, int rpm, int expected_rpm, int cpu_temp, float system_load);
+
+/**
+ * Log timing analysis for fan response
+ * @param duty_change New duty cycle
+ * @param time_since_last_change Microseconds since last duty change
+ * @param rpm_response_time Microseconds for RPM to respond
+ * @param rpm_before Previous RPM reading
+ * @param rpm_after Current RPM reading
+ */
+void logging_timing_analysis(int duty_change, long time_since_last_change, 
+                           long rpm_response_time, int rpm_before, int rpm_after);
+
+/**
+ * Log recovery sequence details
+ * @param step_number Current recovery step (1-based)
+ * @param total_steps Total recovery steps
+ * @param duty_step Duty cycle for this step
+ * @param rpm_before RPM before step
+ * @param rpm_after RPM after step
+ * @param wait_time_ms Time waited for response
+ * @param success Whether this step was successful
+ */
+void logging_recovery_step(int step_number, int total_steps, int duty_step,
+                         int rpm_before, int rpm_after, int wait_time_ms, bool success);
+
+/**
+ * Log stall prediction indicators
+ * @param rpm_flutter RPM instability detected
+ * @param duty_oscillations Number of duty cycle oscillations
+ * @param temp_spike_detected Temperature spike detected
+ * @param near_stall_conditions Number of near-stall conditions
+ */
+void logging_stall_prediction(bool rpm_flutter, int duty_oscillations, 
+                            bool temp_spike_detected, int near_stall_conditions);
+
+/**
+ * Log environmental context
+ * @param system_uptime System uptime in seconds
+ * @param duty_changes_last_5min Number of duty changes in last 5 minutes
+ * @param temp_gradient Temperature change rate (°C/min)
+ * @param ambient_temp Ambient temperature (if available)
+ * @param humidity Humidity (if available)
+ */
+void logging_environmental_context(long system_uptime, int duty_changes_last_5min,
+                                 float temp_gradient, float ambient_temp, float humidity);
+
+/**
+ * Log EC register dump for debugging
+ * @param registers Array of register values (0-255)
+ * @param num_registers Number of registers to log
+ */
+void logging_ec_register_dump(uint8_t* registers, int num_registers);
 
 /**
  * Clean up logging system

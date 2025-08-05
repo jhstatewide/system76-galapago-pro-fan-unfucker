@@ -46,6 +46,7 @@
 #include "clevo-daemon-dbus.h"
 #include "fan_constants.h"
 #include "logging.h"
+#include "utils.h"
 
 #define NAME "clevo-daemon"
 
@@ -216,7 +217,7 @@ static int ec_io_do(const uint32_t cmd, const uint32_t port, const uint8_t value
 static int calculate_fan_duty(int raw_duty);
 static int calculate_fan_rpms(int raw_rpm_high, int raw_rpm_low);
 static int check_proc_instances(const char* proc_name);
-static void get_time_string(char* buffer, size_t max, const char* format);
+
 static void signal_term(__sighandler_t handler);
 static void parse_command_line(int argc, char* argv[]);
 static bool setup_privileges(void);
@@ -1170,6 +1171,9 @@ static int ec_write_fan_duty(int duty_percentage) {
     if (result == EXIT_SUCCESS) {
         last_duty_change_time = current_time;
         last_duty_change_value = duty_percentage;
+        
+        // Record duty change for enhanced logging
+        record_duty_change();
     }
     
     // Validate fan response after a short delay
@@ -1325,13 +1329,7 @@ static int check_proc_instances(const char* proc_name) {
     return count;
 }
 
-static void get_time_string(char* buffer, size_t max, const char* format) {
-    time_t timer;
-    struct tm tm_info;
-    time(&timer);
-    localtime_r(&timer, &tm_info);
-    strftime(buffer, max, format, &tm_info);
-}
+
 
 static void signal_term(__sighandler_t handler) {
     signal(SIGTERM, handler);

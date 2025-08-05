@@ -11,7 +11,7 @@ SRCDIR := src
 
 # Original monolithic source files
 SRC = clevo-indicator.c privilege_manager.c
-DAEMON_SRC = clevo-daemon.c clevo-daemon-socket.c clevo-daemon-dbus.c privilege_manager.c logging.c
+DAEMON_SRC = clevo-daemon.c clevo-daemon-socket.c clevo-daemon-dbus.c privilege_manager.c logging.c utils.c fan_health.c ec_interface.c
 CLIENT_SRC = clevo-client.c
 DBUS_CLIENT_SRC = clevo-dbus-client.c
 DIAG_SRC = ec_diagnostic.c
