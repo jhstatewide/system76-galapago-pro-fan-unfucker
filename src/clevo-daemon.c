@@ -44,6 +44,7 @@
 #include "privilege_manager.h"
 #include "clevo-daemon-socket.h"
 #include "clevo-daemon-dbus.h"
+#include "logging.h"
 #include "fan_constants.h"
 #include "logging.h"
 #include "utils.h"
@@ -264,7 +265,7 @@ int main(int argc, char* argv[]) {
     printf("Clevo Fan Control Daemon v%s\n", VERSION);
     
     // Initialize logging system
-    if (logging_init("clevo-daemon", debug_mode ? LOG_DEBUG : LOG_INFO, 0) != 0) {
+    if (logging_init("clevo-daemon", debug_mode ? LOG_DEBUG : LOG_INFO, 0, debug_mode) != 0) {
         printf("Failed to initialize logging system\n");
         return EXIT_FAILURE;
     }
@@ -645,7 +646,7 @@ static int daemon_ec_worker(void) {
         if (next_duty != 0 && (next_duty != share_info->auto_duty_val || emergency_mode)) {
             char s_time[256];
             get_time_string(s_time, 256, "%m/%d %H:%M:%S");
-            daemon_log(LOG_INFO, "%s CPU=%d°C, auto fan duty to %d%%", s_time, share_info->cpu_temp, next_duty);
+                            logging_telemetry("%s CPU=%d°C, auto fan duty to %d%%", s_time, share_info->cpu_temp, next_duty);
             int write_result = ec_write_fan_duty(next_duty);
             if (debug_mode) daemon_log(LOG_DEBUG, "ec_write_fan_duty (auto) returned: %d", write_result);
             share_info->auto_duty_val = next_duty;
@@ -661,7 +662,7 @@ static int daemon_ec_worker(void) {
             if (manual_duty >= 1 && manual_duty <= 100) {
                 char s_time[256];
                 get_time_string(s_time, 256, "%m/%d %H:%M:%S");
-                daemon_log(LOG_INFO, "%s Manual fan duty to %d%%", s_time, manual_duty);
+                logging_telemetry("%s Manual fan duty to %d%%", s_time, manual_duty);
                 int write_result = ec_write_fan_duty(manual_duty);
                 if (debug_mode) daemon_log(LOG_DEBUG, "ec_write_fan_duty (manual) returned: %d", write_result);
                 share_info->manual_prev_fan_duty = manual_duty;
@@ -918,7 +919,7 @@ static int ec_auto_duty_adjust(void) {
     
     // Stall prevention: Never go below minimum safe duty
     if (new_duty < fan_stall_prevention_threshold && temp > target_temperature) {
-        daemon_log(LOG_INFO, "Duty cycle %d%% below stall prevention threshold, adjusting to %d%%", 
+        logging_telemetry("Duty cycle %d%% below stall prevention threshold, adjusting to %d%%", 
                   new_duty, fan_stall_prevention_threshold);
         new_duty = fan_stall_prevention_threshold;
     }
@@ -926,7 +927,7 @@ static int ec_auto_duty_adjust(void) {
     // High duty stall prevention: Avoid very high duty cycles if fan has been stuck recently
     time_t current_time = time(NULL);
     if (new_duty > 80 && (current_time - fan_health.last_stall_detection) < 300) {  // Within 5 minutes of stall
-        daemon_log(LOG_INFO, "Limiting duty to 80%% to avoid high duty stall (recent stall detected)");
+        logging_telemetry("Limiting duty to 80%% to avoid high duty stall (recent stall detected)");
         new_duty = 80;
     }
     
@@ -1081,7 +1082,7 @@ static int ec_auto_duty_adjust(void) {
         // Attempt recovery by temporarily boosting fan speed - STAY WITHIN VALID RANGE
         int recovery_duty = MAX(new_duty + 20, FAN_EMERGENCY_DUTY);
         new_duty = MIN(recovery_duty, 100);  // Never exceed 100%
-        daemon_log(LOG_INFO, "Attempting fan recovery by setting duty to %d%%", new_duty);
+        logging_telemetry("Attempting fan recovery by setting duty to %d%%", new_duty);
     }
     
     // CRITICAL TEMPERATURE PROTECTION
@@ -1131,7 +1132,7 @@ static int ec_query_fan_rpms(void) {
 static int ec_write_fan_duty(int duty_percentage) {
     // Enforce minimum duty cycle with stall prevention
     if (duty_percentage < MIN_FAN_DUTY) {
-        daemon_log(LOG_INFO, "Adjusting fan duty to minimum: %d%% -> %d%%", duty_percentage, MIN_FAN_DUTY);
+        logging_telemetry("Adjusting fan duty to minimum: %d%% -> %d%%", duty_percentage, MIN_FAN_DUTY);
         duty_percentage = MIN_FAN_DUTY;
     }
     
@@ -1366,7 +1367,7 @@ static void parse_command_line(int argc, char* argv[]) {
                 printf("Usage: %s [OPTIONS] [FAN_DUTY|TARGET_TEMP]\n\n", NAME);
                 printf("Options:\n");
                 printf("  -h, --help                    Show this help message\n");
-                printf("  -d, --debug                   Enable debug mode\n");
+                printf("  -d, --debug                   Enable debug mode (verbose telemetry logging)\n");
                 printf("  -D, --daemon                  Run in daemon mode (default)\n");
                 printf("  -f, --foreground              Run in foreground mode with enhanced debugging\n");
                 printf("  -i, --interval SECONDS        Status update interval (default: 2.0)\n");
@@ -1383,7 +1384,8 @@ static void parse_command_line(int argc, char* argv[]) {
                 printf("  TARGET_TEMP                   Set target temperature (40-100°C)\n\n");
                 printf("Examples:\n");
                 printf("  %s --foreground               # Run in foreground with debug output\n", NAME);
-                printf("  %s --debug --foreground       # Run in foreground with debug mode\n", NAME);
+                printf("  %s --debug --foreground       # Run with verbose telemetry logging\n", NAME);
+                printf("  %s --debug                    # Run daemon with verbose telemetry logging\n", NAME);
                 printf("  %s 50                         # Set fan to 50%% duty\n", NAME);
                 printf("  %s 70                         # Run daemon with 70°C target\n", NAME);
                 printf("  %s --live-stats               # Run with live statistics\n", NAME);
@@ -1716,7 +1718,7 @@ static void check_fan_health(void) {
             
             // Check if we can attempt recovery (respect cooldown)
             if (current_time - last_fan_recovery_time > fan_recovery_cooldown) {
-                daemon_log(LOG_INFO, "Attempting fan recovery by setting duty to 60%%");
+                logging_telemetry("Attempting fan recovery by setting duty to 60%%");
                 ec_write_fan_duty(60);
                 
                 // Wait 2 seconds for fan to respond
@@ -1727,7 +1729,7 @@ static void check_fan_health(void) {
                 
                 int new_rpm = ec_query_fan_rpms();
                 if (new_rpm > 0) {
-                    daemon_log(LOG_INFO, "Fan may not have responded: RPM 0 -> %d at duty 60%%", new_rpm);
+                    logging_telemetry("Fan may not have responded: RPM 0 -> %d at duty 60%%", new_rpm);
                     fan_health.last_recovery_success = 1;
                 } else {
                     daemon_log(LOG_WARNING, "Fan still not responding, will try full recovery");
@@ -1750,7 +1752,7 @@ static void check_fan_health(void) {
         
         // Check if we can attempt recovery (respect cooldown)
         if (current_time - last_fan_recovery_time > fan_recovery_cooldown) {
-            daemon_log(LOG_INFO, "Attempting fan recovery by setting duty to 25%% (avoiding high duty stall)");
+                            logging_telemetry("Attempting fan recovery by setting duty to 25%% (avoiding high duty stall)");
             ec_write_fan_duty(25);  // Use 25% instead of 60% since high duty causes stalls
             
             // Wait 2 seconds for fan to respond
@@ -1761,7 +1763,7 @@ static void check_fan_health(void) {
             
             int new_rpm = ec_query_fan_rpms();
             if (new_rpm > expected_min_rpm * 0.5) {  // If RPM improved significantly
-                daemon_log(LOG_INFO, "Fan recovery successful: RPM %d -> %d at duty 25%%", current_rpm, new_rpm);
+                logging_telemetry("Fan recovery successful: RPM %d -> %d at duty 25%%", current_rpm, new_rpm);
                 fan_health.last_recovery_success = 1;
             } else {
                 daemon_log(LOG_WARNING, "Fan still stuck at low RPM (%d), will try full recovery", new_rpm);
@@ -1791,7 +1793,7 @@ static void check_fan_health(void) {
             int new_duty = MAX(current_duty + 15, MIN_FAN_DUTY);
             new_duty = MIN(new_duty, 100);  // Never exceed 100%
             ec_write_fan_duty(new_duty);
-            daemon_log(LOG_INFO, "Increasing fan duty to %d%% to maintain safe RPM", new_duty);
+            logging_telemetry("Increasing fan duty to %d%% to maintain safe RPM", new_duty);
             
             if (fan_health.low_rpm_count >= 4) {  // If problem persists, try recovery
                 if (current_time - last_fan_recovery_time > fan_recovery_cooldown) {
@@ -1811,16 +1813,16 @@ static void check_fan_health(void) {
 }
 
 static int attempt_fan_recovery(void) {
-    daemon_log(LOG_INFO, "Attempting fan recovery...");
+            logging_telemetry("Attempting fan recovery...");
     
     // Step 1: Gentle kick-start at 60% (less aggressive than 100%)
-    daemon_log(LOG_INFO, "Recovery step 1/5: Setting fan to 60%%");
+            logging_telemetry("Recovery step 1/5: Setting fan to 60%%");
     ec_write_fan_duty(60);
     
     // Wait 3 seconds for fan to respond
     for (int i = 0; i < 30; i++) {
         if (!running) {
-            daemon_log(LOG_INFO, "Shutdown requested during fan recovery - aborting");
+            logging_telemetry("Shutdown requested during fan recovery - aborting");
             return EXIT_FAILURE;
         }
         usleep(100000);  // 100ms chunks
@@ -1828,18 +1830,18 @@ static int attempt_fan_recovery(void) {
     
     int rpm = ec_query_fan_rpms();
     if (rpm > SAFE_FAN_RPM) {
-        daemon_log(LOG_INFO, "Fan responding at %d RPM - recovery successful", rpm);
+        logging_telemetry("Fan responding at %d RPM - recovery successful", rpm);
         return EXIT_SUCCESS;
     }
     
     // Step 2: Try 80% if 60% didn't work
-    daemon_log(LOG_INFO, "Recovery step 2/5: Setting fan to 80%%");
+    logging_telemetry("Recovery step 2/5: Setting fan to 80%%");
     ec_write_fan_duty(80);
     
     // Wait 2 seconds
     for (int i = 0; i < 20; i++) {
         if (!running) {
-            daemon_log(LOG_INFO, "Shutdown requested during fan recovery - aborting");
+            logging_telemetry("Shutdown requested during fan recovery - aborting");
             return EXIT_FAILURE;
         }
         usleep(100000);
@@ -1852,13 +1854,13 @@ static int attempt_fan_recovery(void) {
     }
     
     // Step 3: Try 25% (we discovered this works better than 100%)
-    daemon_log(LOG_INFO, "Recovery step 3/5: Setting fan to 25%% (avoiding high duty stall)");
+    logging_telemetry("Recovery step 3/5: Setting fan to 25%% (avoiding high duty stall)");
     ec_write_fan_duty(25);
     
     // Wait 3 seconds
     for (int i = 0; i < 30; i++) {
         if (!running) {
-            daemon_log(LOG_INFO, "Shutdown requested during fan recovery - aborting");
+            logging_telemetry("Shutdown requested during fan recovery - aborting");
             return EXIT_FAILURE;
         }
         usleep(100000);
@@ -1876,12 +1878,12 @@ static int attempt_fan_recovery(void) {
     
     for (int i = 0; i < num_duties; i++) {
         if (!running) {
-            daemon_log(LOG_INFO, "Shutdown requested during fan recovery - aborting");
+            logging_telemetry("Shutdown requested during fan recovery - aborting");
             return EXIT_FAILURE;
         }
         
         int duty = recovery_duties[i];
-        daemon_log(LOG_INFO, "Recovery step %d/5: Setting fan to %d%%", 
+        logging_telemetry("Recovery step %d/5: Setting fan to %d%%", 
                   i + 4, duty);
         
         ec_write_fan_duty(duty);
@@ -1889,7 +1891,7 @@ static int attempt_fan_recovery(void) {
         // Wait 1 second between changes
         for (int j = 0; j < 10; j++) {
             if (!running) {
-                daemon_log(LOG_INFO, "Shutdown requested during fan recovery - aborting");
+                logging_telemetry("Shutdown requested during fan recovery - aborting");
                 return EXIT_FAILURE;
             }
             usleep(100000);  // 100ms chunks
@@ -1898,7 +1900,7 @@ static int attempt_fan_recovery(void) {
         // Check if fan responded
         rpm = ec_query_fan_rpms();
         if (rpm > SAFE_FAN_RPM) {
-            daemon_log(LOG_INFO, "Fan responding at %d RPM - recovery successful", rpm);
+            logging_telemetry("Fan responding at %d RPM - recovery successful", rpm);
             return EXIT_SUCCESS;
         }
     }

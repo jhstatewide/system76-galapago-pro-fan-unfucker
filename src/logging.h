@@ -21,9 +21,10 @@ typedef enum {
  * @param program_name Name of the program for syslog
  * @param log_level Initial log level
  * @param quiet_mode Enable quiet mode (only errors)
+ * @param debug_mode Enable debug mode (verbose telemetry logging)
  * @return 0 on success, -1 on failure
  */
-int logging_init(const char* program_name, log_level_t log_level, int quiet_mode);
+int logging_init(const char* program_name, log_level_t log_level, int quiet_mode, int debug_mode);
 
 /**
  * Set log level
@@ -36,6 +37,18 @@ void logging_set_level(log_level_t level);
  * @param quiet Enable/disable quiet mode
  */
 void logging_set_quiet(int quiet);
+
+/**
+ * Set debug mode
+ * @param debug Enable/disable debug mode (controls telemetry logging verbosity)
+ */
+void logging_set_debug_mode(int debug);
+
+/**
+ * Check if debug mode is enabled
+ * @return 1 if debug mode is enabled, 0 otherwise
+ */
+int logging_is_debug_mode(void);
 
 /**
  * Log a message
@@ -72,6 +85,13 @@ void logging_warning(const char* format, ...);
  * @param ... Variable arguments
  */
 void logging_error(const char* format, ...);
+
+/**
+ * Log telemetry information (only logged in debug mode)
+ * @param format Format string
+ * @param ... Variable arguments
+ */
+void logging_telemetry(const char* format, ...);
 
 /**
  * Enhanced diagnostic logging functions

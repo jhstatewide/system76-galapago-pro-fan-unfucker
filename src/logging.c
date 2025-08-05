@@ -21,10 +21,10 @@ static int last_duty_change = 0;
 static int rpm_history[10] = {0}; // Track last 10 RPM readings
 static int rpm_history_index = 0;
 
-int logging_init(const char* program_name, log_level_t initial_log_level, int initial_quiet_mode) {
+int logging_init(const char* program_name, log_level_t initial_log_level, int initial_quiet_mode, int initial_debug_mode) {
     log_level = initial_log_level;
     quiet_mode = initial_quiet_mode;
-    debug_mode = (initial_log_level == LOG_DEBUG);
+    debug_mode = initial_debug_mode;
     
     openlog(program_name, LOG_PID | LOG_CONS, LOG_DAEMON);
     return 0;
@@ -32,11 +32,18 @@ int logging_init(const char* program_name, log_level_t initial_log_level, int in
 
 void logging_set_level(log_level_t level) {
     log_level = level;
-    debug_mode = (level == LOG_DEBUG);
 }
 
 void logging_set_quiet(int quiet) {
     quiet_mode = quiet;
+}
+
+void logging_set_debug_mode(int debug) {
+    debug_mode = debug;
+}
+
+int logging_is_debug_mode(void) {
+    return debug_mode;
 }
 
 void logging_log(int priority, const char* format, ...) {
@@ -78,28 +85,56 @@ void logging_debug(const char* format, ...) {
 void logging_info(const char* format, ...) {
     va_list args;
     va_start(args, format);
-    logging_log(LOG_INFO, format, args);
+    vsyslog(LOG_INFO, format, args);
+    if (debug_mode) {
+        vprintf(format, args);
+        printf("\n");
+        fflush(stdout);
+    }
     va_end(args);
 }
 
 void logging_warning(const char* format, ...) {
     va_list args;
     va_start(args, format);
-    logging_log(LOG_WARNING, format, args);
+    vsyslog(LOG_WARNING, format, args);
+    vprintf(format, args);
+    printf("\n");
+    fflush(stdout);
     va_end(args);
 }
 
 void logging_error(const char* format, ...) {
     va_list args;
     va_start(args, format);
-    logging_log(LOG_ERR, format, args);
+    vsyslog(LOG_ERR, format, args);
+    vprintf(format, args);
+    printf("\n");
+    fflush(stdout);
+    va_end(args);
+}
+
+void logging_telemetry(const char* format, ...) {
+    // Only log telemetry if debug mode is enabled
+    if (!debug_mode) {
+        return;
+    }
+    
+    va_list args;
+    va_start(args, format);
+    vsyslog(LOG_INFO, format, args);
+    if (debug_mode) {
+        vprintf(format, args);
+        printf("\n");
+        fflush(stdout);
+    }
     va_end(args);
 }
 
 // Enhanced diagnostic logging functions
 
 void logging_hardware_state(int duty, int rpm, int expected_rpm, int cpu_temp, float system_load) {
-    logging_info("HARDWARE_STATE: duty=%d%%, rpm=%d, expected_rpm=%d, cpu_temp=%d°C, system_load=%.2f", 
+    logging_telemetry("HARDWARE_STATE: duty=%d%%, rpm=%d, expected_rpm=%d, cpu_temp=%d°C, system_load=%.2f", 
                 duty, rpm, expected_rpm, cpu_temp, system_load);
     
     // Calculate RPM deviation
@@ -114,7 +149,7 @@ void logging_hardware_state(int duty, int rpm, int expected_rpm, int cpu_temp, f
 
 void logging_timing_analysis(int duty_change, long time_since_last_change, 
                            long rpm_response_time, int rpm_before, int rpm_after) {
-    logging_info("TIMING_ANALYSIS: duty_change=%d%%, time_since_last_change=%ldμs, rpm_response_time=%ldμs, rpm_before=%d, rpm_after=%d", 
+    logging_telemetry("TIMING_ANALYSIS: duty_change=%d%%, time_since_last_change=%ldμs, rpm_response_time=%ldμs, rpm_before=%d, rpm_after=%d", 
                 duty_change, time_since_last_change, rpm_response_time, rpm_before, rpm_after);
     
     // Track RPM history for flutter detection
@@ -140,11 +175,11 @@ void logging_timing_analysis(int duty_change, long time_since_last_change,
 
 void logging_recovery_step(int step_number, int total_steps, int duty_step,
                          int rpm_before, int rpm_after, int wait_time_ms, bool success) {
-    logging_info("RECOVERY_STEP: step=%d/%d, duty=%d%%, rpm_before=%d, rpm_after=%d, wait_time=%dms, success=%s", 
+    logging_telemetry("RECOVERY_STEP: step=%d/%d, duty=%d%%, rpm_before=%d, rpm_after=%d, wait_time=%dms, success=%s", 
                 step_number, total_steps, duty_step, rpm_before, rpm_after, wait_time_ms, success ? "true" : "false");
     
     if (success) {
-        logging_info("RECOVERY_SUCCESS: step %d resolved stuck fan, rpm improvement: %d -> %d (+%d)", 
+        logging_telemetry("RECOVERY_SUCCESS: step %d resolved stuck fan, rpm improvement: %d -> %d (+%d)", 
                     step_number, rpm_before, rpm_after, rpm_after - rpm_before);
     } else {
         logging_warning("RECOVERY_FAILURE: step %d did not resolve stuck fan, rpm: %d -> %d", 
@@ -165,7 +200,7 @@ void logging_stall_prediction(bool rpm_flutter, int duty_oscillations,
 
 void logging_environmental_context(long system_uptime, int duty_changes_last_5min,
                                  float temp_gradient, float ambient_temp, float humidity) {
-    logging_info("ENVIRONMENTAL: uptime=%lds, duty_changes_5min=%d, temp_gradient=%.2f°C/min, ambient=%.1f°C, humidity=%.1f%%", 
+    logging_telemetry("ENVIRONMENTAL: uptime=%lds, duty_changes_5min=%d, temp_gradient=%.2f°C/min, ambient=%.1f°C, humidity=%.1f%%", 
                 system_uptime, duty_changes_last_5min, temp_gradient, ambient_temp, humidity);
     
     // Analyze environmental risk factors
@@ -188,10 +223,10 @@ void logging_environmental_context(long system_uptime, int duty_changes_last_5mi
 }
 
 void logging_ec_register_dump(uint8_t* registers, int num_registers) {
-    logging_info("EC_REGISTER_DUMP: Dumping %d registers", num_registers);
+    logging_telemetry("EC_REGISTER_DUMP: Dumping %d registers", num_registers);
     
     // Log key registers with labels
-    logging_info("EC_KEY_REGS: CPU_TEMP(0x07)=0x%02X, FAN_DUTY(0xCE)=0x%02X, FAN_RPM_HI(0xD0)=0x%02X, FAN_RPM_LO(0xD1)=0x%02X", 
+        logging_telemetry("EC_KEY_REGS: CPU_TEMP(0x07)=0x%02X, FAN_DUTY(0xCE)=0x%02X, FAN_RPM_HI(0xD0)=0x%02X, FAN_RPM_LO(0xD1)=0x%02X",
                 registers[0x07], registers[0xCE], registers[0xD0], registers[0xD1]);
     
     // Log full register dump in debug mode

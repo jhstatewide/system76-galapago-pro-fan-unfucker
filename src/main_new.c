@@ -77,7 +77,7 @@ static int initialize_modules(void) {
     }
     
     // Initialize logging
-    if (logging_init("clevo-daemon", config->log_level, config->quiet_mode) != 0) {
+    if (logging_init("clevo-daemon", config->log_level, config->quiet_mode, config->debug_mode) != 0) {
         printf("Failed to initialize logging\n");
         return -1;
     }
@@ -234,7 +234,7 @@ static int worker_loop(void) {
             if (next_duty != 0 && (next_duty != auto_duty_val || emergency_mode)) {
                 char time_str[256];
                 get_time_string(time_str, 256, "%m/%d %H:%M:%S");
-                logging_info("%s CPU=%d°C, auto fan duty to %d%%", time_str, cpu_temp, next_duty);
+                logging_telemetry("%s CPU=%d°C, auto fan duty to %d%%", time_str, cpu_temp, next_duty);
                 
                 if (ec_write_fan_duty(next_duty) == 0) {
                     auto_duty_val = next_duty;
