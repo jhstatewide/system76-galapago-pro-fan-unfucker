@@ -16,7 +16,39 @@ It shows the CPU temperature on the left and the GPU temperature on the right, a
 
 ![Clevo Indicator Screen](https://i.imgur.com/iAezQmN.png?1)
 
+## Recent Improvements: Enhanced Fan Rate Limiting
 
+**Problem Solved**: The fan was getting "stuck" at low RPM (100-200) after temperature surges, causing poor cooling performance.
+
+**Solution**: Implemented softer, more gradual rate limiting that accounts for fan physics:
+
+### New Rate Limiting Settings
+- **Max duty increase**: 15% per cycle (was 10%) - 50% more responsive to heat
+- **Max duty decrease**: 20% per cycle (was 30%) - prevents sudden drops that cause fan stall  
+- **Max duty change**: 25% per cycle (was 15%) - overall softer limits
+- **Emergency response**: Up to 35% for critical temperatures (was 25%)
+
+### Why This Helps
+Real fans have **inertia** - they can't instantly change speed. The previous aggressive rate limiting was causing:
+- Fans to get stuck at low RPM after temperature surges
+- Poor response to heat due to overly conservative limits
+- Mechanical stress from rapid duty cycle changes
+
+### Testing the Improvements
+```bash
+# Test with the new rate limiting
+./test_rate_limiting.sh
+
+# Run a heat test to verify fan behavior
+stress-ng --cpu 4 --timeout 60
+```
+
+### Fine-tuning (if needed)
+If the fan still gets stuck, you can make it even softer:
+```bash
+# More responsive settings
+sudo ./clevo-daemon --max-duty-increase 20 --max-duty-decrease 15 --interval 1.0
+```
 
 For command-line, use *-h* to display help, or a number representing percentage of fan duty to control the fan (from 40% to 100%).
 
