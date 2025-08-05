@@ -12,6 +12,8 @@
 #include <QFont>
 #include <QColor>
 #include <QPoint>
+#include <QVector>
+#include <QRect>
 
 // Forward declaration
 class ClevoSettingsDialog;
@@ -38,6 +40,7 @@ private slots:
     void quitApplication();
     void reconnectToDaemon();
     void openSettings();
+    void toggleCharts(); // New slot for chart toggle
 
 private:
     // Window properties
@@ -52,6 +55,12 @@ private:
     void drawFanInfo(QPainter &painter);
     void drawModeInfo(QPainter &painter);
     void drawStatusBar(QPainter &painter);
+    
+    // Chart methods (new)
+    void drawSparklines(QPainter &painter);
+    void drawSparkline(QPainter &painter, const QVector<int> &data, 
+                      const QRect &rect, const QColor &color, const QString &label);
+    void updateChartData();
     
     // Color helpers
     QColor getTemperatureColor(int temp);
@@ -95,6 +104,15 @@ private:
     int lastDisplayFanDuty;
     int lastDisplayFanRpm;
     bool lastDisplayAutoMode;
+    
+    // Chart data (new)
+    static const int CHART_HISTORY_SIZE = 60; // 1 second at 60FPS
+    QVector<int> tempHistory;
+    QVector<int> fanRpmHistory;
+    QVector<int> fanDutyHistory;
+    int chartDataIndex;
+    bool chartsEnabled;
+    bool chartsVisible;
 };
 
 #endif // CLEVO_GUI_H 

@@ -34,7 +34,18 @@ ClevoMonitor::ClevoMonitor(QWidget *parent)
     , lastDisplayFanDuty(-1)
     , lastDisplayFanRpm(-1)
     , lastDisplayAutoMode(false)
+    , chartDataIndex(0)
+    , chartsEnabled(true)
+    , chartsVisible(false)
 {
+    // Initialize chart data vectors
+    tempHistory.resize(CHART_HISTORY_SIZE);
+    fanRpmHistory.resize(CHART_HISTORY_SIZE);
+    fanDutyHistory.resize(CHART_HISTORY_SIZE);
+    tempHistory.fill(0);
+    fanRpmHistory.fill(0);
+    fanDutyHistory.fill(0);
+    
     setupWindow();
     setupTimer();
     setupSocket();
@@ -91,6 +102,12 @@ void ClevoMonitor::setupContextMenu()
     QAction *settingsAction = new QAction("Settings and Commands", this);
     connect(settingsAction, &QAction::triggered, this, &ClevoMonitor::openSettings);
     contextMenu->addAction(settingsAction);
+    
+    contextMenu->addSeparator();
+    
+    QAction *chartsAction = new QAction("Toggle Charts", this);
+    connect(chartsAction, &QAction::triggered, this, &ClevoMonitor::toggleCharts);
+    contextMenu->addAction(chartsAction);
     
     contextMenu->addSeparator();
     
@@ -216,6 +233,7 @@ void ClevoMonitor::updateStatus()
     QString response;
     if (receiveResponse(response)) {
         parseStatusResponse(response);
+        updateChartData(); // Update chart data
         update();  // Trigger redraw
     } else {
         socketConnected = false;
@@ -239,6 +257,11 @@ void ClevoMonitor::paintEvent(QPaintEvent *event)
         drawTemperature(painter);
         drawFanInfo(painter);
         drawModeInfo(painter);
+        
+        // Draw sparklines if enabled and visible
+        if (chartsEnabled && chartsVisible) {
+            drawSparklines(painter);
+        }
     } else {
         // Draw error state
         painter.setPen(Qt::red);
@@ -375,6 +398,9 @@ void ClevoMonitor::keyPressEvent(QKeyEvent *event)
         case Qt::Key_T:
             toggleTransparency();
             break;
+        case Qt::Key_C:
+            toggleCharts();
+            break;
         default:
             QWidget::keyPressEvent(event);
     }
@@ -414,6 +440,98 @@ void ClevoMonitor::openSettings()
     settingsDialog->show();
     settingsDialog->raise();
     settingsDialog->activateWindow();
+}
+
+// Chart methods
+void ClevoMonitor::updateChartData()
+{
+    if (!dataValid) return;
+    
+    // Add current data to history
+    tempHistory[chartDataIndex] = cpuTemp;
+    fanRpmHistory[chartDataIndex] = fanRpm;
+    fanDutyHistory[chartDataIndex] = fanDuty;
+    
+    // Increment index with wraparound
+    chartDataIndex = (chartDataIndex + 1) % CHART_HISTORY_SIZE;
+}
+
+void ClevoMonitor::drawSparklines(QPainter &painter)
+{
+    // Calculate chart area (bottom portion of window)
+    int chartHeight = 60;
+    int chartY = height() - chartHeight - 20; // Leave space for status bar
+    
+    // Draw temperature sparkline
+    QRect tempRect(10, chartY, 60, 15);
+    drawSparkline(painter, tempHistory, tempRect, getTemperatureColor(cpuTemp), "T");
+    
+    // Draw fan RPM sparkline
+    QRect rpmRect(80, chartY, 60, 15);
+    drawSparkline(painter, fanRpmHistory, rpmRect, getFanRpmColor(fanRpm, fanDuty), "R");
+    
+    // Draw fan duty sparkline
+    QRect dutyRect(150, chartY, 60, 15);
+    drawSparkline(painter, fanDutyHistory, dutyRect, Qt::cyan, "D");
+}
+
+void ClevoMonitor::drawSparkline(QPainter &painter, const QVector<int> &data, 
+                                 const QRect &rect, const QColor &color, const QString &label)
+{
+    if (data.isEmpty()) return;
+    
+    // Find min/max for scaling
+    int minVal = data[0], maxVal = data[0];
+    for (int val : data) {
+        if (val > 0) { // Only consider valid data
+            minVal = qMin(minVal, val);
+            maxVal = qMax(maxVal, val);
+        }
+    }
+    
+    // Avoid division by zero
+    if (maxVal == minVal) maxVal = minVal + 1;
+    
+    // Draw label
+    painter.setPen(Qt::white);
+    painter.setFont(QFont("Arial", 8));
+    painter.drawText(rect.left(), rect.top() - 2, label);
+    
+    // Draw sparkline
+    painter.setPen(QPen(color, 1));
+    
+    QVector<QPoint> points;
+    points.reserve(CHART_HISTORY_SIZE);
+    
+    for (int i = 0; i < CHART_HISTORY_SIZE; ++i) {
+        int dataIndex = (chartDataIndex + i) % CHART_HISTORY_SIZE;
+        int val = data[dataIndex];
+        
+        if (val > 0) { // Only draw valid data points
+            int x = rect.left() + (i * rect.width()) / CHART_HISTORY_SIZE;
+            int y = rect.bottom() - ((val - minVal) * rect.height()) / (maxVal - minVal);
+            points.append(QPoint(x, y));
+        }
+    }
+    
+    // Draw the sparkline as a polyline for maximum performance
+    if (points.size() > 1) {
+        painter.drawPolyline(points.data(), points.size());
+    }
+}
+
+void ClevoMonitor::toggleCharts()
+{
+    chartsVisible = !chartsVisible;
+    
+    // Resize window based on chart visibility
+    if (chartsVisible) {
+        resize(220, 160); // Larger window for charts
+    } else {
+        resize(200, 100); // Original size
+    }
+    
+    update();
 }
 
 int main(int argc, char *argv[])
