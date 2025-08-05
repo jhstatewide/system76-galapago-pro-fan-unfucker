@@ -104,6 +104,7 @@ static volatile int running = 1;
 int max_duty_change_rate = 25;  // Increased from 15 - softer overall change limit
 int max_duty_increase_rate = 15;  // Increased from 10 - allow faster response to heat
 int max_duty_decrease_rate = 20;  // Reduced from 30 - prevent sudden drops that cause stall
+int max_duty_cycle = FAN_MAX_DUTY;  // Configurable maximum duty cycle (default: 85%)
 
 // Fan bearing protection variables
 static time_t last_duty_change_time = 0;
@@ -755,8 +756,8 @@ static int ec_auto_duty_adjust(void) {
             new_duty = MAX(duty - 2, 0);
         }
 
-        if (new_duty > 100) {
-            new_duty = 100;
+        if (new_duty > max_duty_cycle) {
+            new_duty = max_duty_cycle;
         } else if (new_duty < 0) {
             new_duty = 0;
         }
@@ -802,10 +803,10 @@ static int ec_auto_duty_adjust(void) {
     int new_duty = 0;
     
     if (temp_error >= 8) {
-        // Emergency response: 100% duty when temp is 8°C+ above target
-        new_duty = 100;
+        // Emergency response: maximum duty when temp is 8°C+ above target
+        new_duty = max_duty_cycle;
         if (debug_mode) {
-            daemon_log(LOG_DEBUG, "Emergency response: temp=%d, target=%d, error=%d°C, setting duty to 100%%", temp, target_temperature, temp_error);
+            daemon_log(LOG_DEBUG, "Emergency response: temp=%d, target=%d, error=%d°C, setting duty to %d%%", temp, target_temperature, temp_error, max_duty_cycle);
         }
     } else if (temp_error >= 5) {
         // High temp response: 90% duty when temp is 5°C+ above target
@@ -826,8 +827,8 @@ static int ec_auto_duty_adjust(void) {
         
         // Integral term with anti-windup
         pid_integral += error;
-        if (pid_integral > 100.0) pid_integral = 100.0;
-        if (pid_integral < -100.0) pid_integral = -100.0;
+        if (pid_integral > (double)max_duty_cycle) pid_integral = (double)max_duty_cycle;
+        if (pid_integral < -(double)max_duty_cycle) pid_integral = -(double)max_duty_cycle;
         double integral = pid_ki * pid_integral;
         
         // Derivative term
@@ -1069,7 +1070,7 @@ static int ec_auto_duty_adjust(void) {
     }
     
     // Ensure duty cycle is within valid range
-    if (new_duty > 100) new_duty = 100;
+    if (new_duty > max_duty_cycle) new_duty = max_duty_cycle;
     if (new_duty < MIN_FAN_DUTY) new_duty = MIN_FAN_DUTY;  // Never go below minimum duty
     
     // CRITICAL: Ensure duty cycle will result in RPM above minimum threshold
@@ -1091,7 +1092,7 @@ static int ec_auto_duty_adjust(void) {
         
         // More aggressive recovery: boost to emergency duty immediately
         int recovery_duty = MAX(new_duty + 30, FAN_EMERGENCY_DUTY);
-        new_duty = MIN(recovery_duty, 100);  // Never exceed 100%
+        new_duty = MIN(recovery_duty, max_duty_cycle);  // Never exceed maximum duty
         logging_telemetry("Attempting aggressive fan recovery by setting duty to %d%%", new_duty);
         
         // Force immediate EC write with retry for recovery
@@ -1102,9 +1103,9 @@ static int ec_auto_duty_adjust(void) {
     
     // CRITICAL TEMPERATURE PROTECTION
     if (temp >= FAN_EMERGENCY_SHUTDOWN_TEMP) {
-        daemon_log(LOG_CRIT, "EMERGENCY: Temperature %d°C exceeds shutdown threshold %d°C - forcing 100%% duty", 
-                  temp, FAN_EMERGENCY_SHUTDOWN_TEMP);
-        new_duty = 100; // Force maximum cooling
+        daemon_log(LOG_CRIT, "EMERGENCY: Temperature %d°C exceeds shutdown threshold %d°C - forcing %d%% duty", 
+                  temp, FAN_EMERGENCY_SHUTDOWN_TEMP, max_duty_cycle);
+        new_duty = max_duty_cycle; // Force maximum cooling (limited to prevent stalls)
     } else if (temp >= FAN_CRITICAL_TEMP_THRESHOLD) {
         daemon_log(LOG_ERR, "CRITICAL: Temperature %d°C exceeds critical threshold %d°C - ensuring adequate cooling", 
                   temp, FAN_CRITICAL_TEMP_THRESHOLD);
@@ -1116,9 +1117,9 @@ static int ec_auto_duty_adjust(void) {
         daemon_log(LOG_WARNING, "Duty cycle %d%% below minimum %d%%, adjusting", new_duty, MIN_FAN_DUTY);
         new_duty = MIN_FAN_DUTY;
     }
-    if (new_duty > 100) {
-        daemon_log(LOG_WARNING, "Duty cycle %d%% above maximum 100%%, capping", new_duty);
-        new_duty = 100;
+    if (new_duty > max_duty_cycle) {
+        daemon_log(LOG_WARNING, "Duty cycle %d%% above maximum %d%%, capping", new_duty, max_duty_cycle);
+        new_duty = max_duty_cycle;
     }
     
     if (debug_mode) {
@@ -1333,6 +1334,7 @@ static void parse_command_line(int argc, char* argv[]) {
         {"max-duty-change", required_argument, 0, 'm'},
         {"max-duty-increase", required_argument, 0, 'M'},
         {"max-duty-decrease", required_argument, 0, 'N'},
+        {"max-duty", required_argument, 0, 'x'},
         {"privilege-help", no_argument, 0, 'p'},
         {0, 0, 0, 0}
     };
@@ -1340,7 +1342,7 @@ static void parse_command_line(int argc, char* argv[]) {
     int option_index = 0;
     int c;
     
-    while ((c = getopt_long(argc, argv, "hdDfi:t:l:LI:m:M:N:p", long_options, &option_index)) != -1) {
+    while ((c = getopt_long(argc, argv, "hdDfi:t:l:LI:m:M:N:x:p", long_options, &option_index)) != -1) {
         switch (c) {
             case 'h':
                 printf("Clevo Fan Control Daemon v%s\n", VERSION);
@@ -1359,6 +1361,7 @@ static void parse_command_line(int argc, char* argv[]) {
                 printf("  -m, --max-duty-change RATE    Max duty change per cycle %% (default: 25)\n");
                 printf("  -M, --max-duty-increase RATE  Max duty increase per cycle %% (default: 15)\n");
                 printf("  -N, --max-duty-decrease RATE  Max duty decrease per cycle %% (default: 20)\n");
+                printf("  -x, --max-duty PERCENT        Maximum duty cycle %% (default: 85)\n");
                 printf("  -p, --privilege-help          Show privilege setup help\n\n");
                 printf("Arguments:\n");
                 printf("  FAN_DUTY                      Set fan to specific duty cycle (1-100%%)\n");
@@ -1442,6 +1445,14 @@ static void parse_command_line(int argc, char* argv[]) {
                 max_duty_decrease_rate = atoi(optarg);
                 if (max_duty_decrease_rate < 1 || max_duty_decrease_rate > 100) {
                     fprintf(stderr, "Error: Max duty decrease rate must be between 1 and 100%%\n");
+                    exit(EXIT_FAILURE);
+                }
+                break;
+                
+            case 'x':
+                max_duty_cycle = atoi(optarg);
+                if (max_duty_cycle < 50 || max_duty_cycle > 100) {
+                    fprintf(stderr, "Error: Max duty cycle must be between 50 and 100%%\n");
                     exit(EXIT_FAILURE);
                 }
                 break;
@@ -1860,7 +1871,7 @@ static void check_fan_health(void) {
             
             // Increase duty cycle by 15% or to minimum safe duty
             int new_duty = MAX(current_duty + 15, MIN_FAN_DUTY);
-            new_duty = MIN(new_duty, 100);  // Never exceed 100%
+            new_duty = MIN(new_duty, max_duty_cycle);  // Never exceed maximum duty
             ec_write_fan_duty(new_duty);
             logging_telemetry("Increasing fan duty to %d%% to maintain safe RPM", new_duty);
             
@@ -1910,9 +1921,9 @@ static int attempt_fan_recovery(void) {
         return EXIT_SUCCESS;
     }
     
-    // Step 2: Try 80% if 60% didn't work
-    logging_telemetry("Recovery step 2/5: Setting fan to 80%%");
-    ec_write_fan_duty(80);
+    // Step 2: Try maximum duty if 60% didn't work (but avoid 100% to prevent stalls)
+    logging_telemetry("Recovery step 2/5: Setting fan to %d%%", max_duty_cycle);
+    ec_write_fan_duty(max_duty_cycle);
     
     // Wait 2 seconds
     for (int i = 0; i < 20; i++) {
@@ -1927,7 +1938,7 @@ static int attempt_fan_recovery(void) {
     if (rpm > SAFE_FAN_RPM) {
         daemon_log(LOG_INFO, "Fan responding at %d RPM - recovery successful", rpm);
         // Enter post-recovery cooldown to prevent immediate re-stall
-        enter_cooldown_state(1, 45, 80);  // 45 seconds cooldown at 80% duty
+        enter_cooldown_state(1, 45, max_duty_cycle);  // 45 seconds cooldown at maximum duty
         return EXIT_SUCCESS;
     }
     
