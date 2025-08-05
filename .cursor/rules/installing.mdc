@@ -1,0 +1,10 @@
+---
+alwaysApply: true
+---
+Whenever you have a new build of the software, sudo systemctl stop it, make install and then bring the service back up.
+
+If you want to see the logs, you also need sudo journalctl -u clevo-daemon
+
+Don't use the pager, from systemd or otherwise.
+
+Whatever the command line program make sure the pager is disabled.      
