@@ -34,6 +34,15 @@ typedef struct {
     // Recovery analytics
     int successful_recovery_steps[10];
     int recovery_step_success_count;
+    
+    // RPM validation and filtering
+    int rpm_moving_average[FAN_RPM_MOVING_AVERAGE_SIZE];
+    int rpm_avg_index;
+    int rpm_avg_count;
+    struct timeval last_duty_change_for_settling;
+    bool settling_period_active;
+    int consecutive_suspicious_readings;
+    float rpm_confidence_score;
 } enhanced_fan_health_monitor_t;
 
 fan_health_monitor_t* fan_health_init(int min_fan_rpm, int safe_fan_rpm, int emergency_duty,
@@ -81,7 +90,91 @@ fan_health_monitor_t* fan_health_init(int min_fan_rpm, int safe_fan_rpm, int eme
     memset(monitor->successful_recovery_steps, 0, sizeof(monitor->successful_recovery_steps));
     monitor->recovery_step_success_count = 0;
     
+    // Initialize RPM validation fields
+    memset(monitor->rpm_moving_average, 0, sizeof(monitor->rpm_moving_average));
+    monitor->rpm_avg_index = 0;
+    monitor->rpm_avg_count = 0;
+    gettimeofday(&monitor->last_duty_change_for_settling, NULL);
+    monitor->settling_period_active = false;
+    monitor->consecutive_suspicious_readings = 0;
+    monitor->rpm_confidence_score = 1.0;
+    
     return (fan_health_monitor_t*)monitor;
+}
+
+// Helper function to calculate moving average of RPM readings
+static int calculate_rpm_moving_average(enhanced_fan_health_monitor_t* monitor) {
+    if (monitor->rpm_avg_count == 0) return 0;
+    
+    int sum = 0;
+    for (int i = 0; i < monitor->rpm_avg_count; i++) {
+        sum += monitor->rpm_moving_average[i];
+    }
+    return sum / monitor->rpm_avg_count;
+}
+
+// Helper function to validate RPM reading
+static bool is_rpm_reading_valid(enhanced_fan_health_monitor_t* monitor, int current_duty, int current_rpm) {
+    // Check for obviously invalid readings
+    if (current_rpm == 0 && current_duty > FAN_RPM_SUSPICIOUS_THRESHOLD) {
+        monitor->consecutive_suspicious_readings++;
+        logging_warning("Suspicious RPM reading: %d RPM at %d%% duty (reading #%d)", 
+                      current_rpm, current_duty, monitor->consecutive_suspicious_readings);
+        return false;
+    }
+    
+    // Check for minimum valid reading
+    if (current_rpm < FAN_RPM_MIN_VALID_READING && current_duty > 20) {
+        monitor->consecutive_suspicious_readings++;
+        logging_warning("Very low RPM reading: %d RPM at %d%% duty (reading #%d)", 
+                      current_rpm, current_duty, monitor->consecutive_suspicious_readings);
+        return false;
+    }
+    
+    // Reset suspicious reading counter if reading looks valid
+    monitor->consecutive_suspicious_readings = 0;
+    return true;
+}
+
+// Helper function to check if we're in settling period
+static bool is_in_settling_period(enhanced_fan_health_monitor_t* monitor) {
+    if (!monitor->settling_period_active) return false;
+    
+    struct timeval current_time;
+    gettimeofday(&current_time, NULL);
+    
+    long time_since_change = (current_time.tv_sec - monitor->last_duty_change_for_settling.tv_sec) * 1000000 +
+                           (current_time.tv_usec - monitor->last_duty_change_for_settling.tv_usec);
+    
+    if (time_since_change > FAN_RPM_SETTLING_TIME_MS * 1000) {
+        monitor->settling_period_active = false;
+        return false;
+    }
+    
+    return true;
+}
+
+// Helper function to calculate RPM confidence score
+static float calculate_rpm_confidence(enhanced_fan_health_monitor_t* monitor, int current_duty, int current_rpm) {
+    float confidence = 1.0;
+    
+    // Reduce confidence if in settling period
+    if (is_in_settling_period(monitor)) {
+        confidence *= 0.3;  // 30% confidence during settling
+    }
+    
+    // Reduce confidence for suspicious readings
+    if (monitor->consecutive_suspicious_readings > 0) {
+        confidence *= (1.0 - (monitor->consecutive_suspicious_readings * 0.2));
+    }
+    
+    // Reduce confidence if RPM is inconsistent with duty
+    int expected_min_rpm = current_duty * 78;  // Using our calibrated ratio
+    if (current_rpm < expected_min_rpm * 0.3 && current_duty > 30) {
+        confidence *= 0.5;  // 50% confidence for very low RPM at high duty
+    }
+    
+    return confidence;
 }
 
 int fan_health_check(fan_health_monitor_t* monitor, int current_duty, int current_rpm) {
@@ -105,6 +198,13 @@ int fan_health_check(fan_health_monitor_t* monitor, int current_duty, int curren
         enhanced_monitor->history_count++;
     }
     
+    // Update moving average for RPM validation
+    enhanced_monitor->rpm_moving_average[enhanced_monitor->rpm_avg_index] = current_rpm;
+    enhanced_monitor->rpm_avg_index = (enhanced_monitor->rpm_avg_index + 1) % FAN_RPM_MOVING_AVERAGE_SIZE;
+    if (enhanced_monitor->rpm_avg_count < FAN_RPM_MOVING_AVERAGE_SIZE) {
+        enhanced_monitor->rpm_avg_count++;
+    }
+    
     // Get CPU temperature for environmental context
     int cpu_temp = ec_query_cpu_temp();
     if (cpu_temp > 0) {
@@ -118,6 +218,11 @@ int fan_health_check(fan_health_monitor_t* monitor, int current_duty, int curren
         time_since_last_change = (current_timeval.tv_sec - enhanced_monitor->last_duty_change_time.tv_sec) * 1000000 +
                                (current_timeval.tv_usec - enhanced_monitor->last_duty_change_time.tv_usec);
         enhanced_monitor->last_duty_change_time = current_timeval;
+        
+        // Start settling period for RPM validation
+        enhanced_monitor->last_duty_change_for_settling = current_timeval;
+        enhanced_monitor->settling_period_active = true;
+        
         record_duty_change(); // Track duty changes for environmental analysis
     }
     
@@ -166,8 +271,38 @@ int fan_health_check(fan_health_monitor_t* monitor, int current_duty, int curren
         monitor->low_rpm_count = 0;
     }
     
+    // RPM validation and filtering
+    bool rpm_reading_valid = is_rpm_reading_valid(enhanced_monitor, current_duty, current_rpm);
+    bool in_settling_period = is_in_settling_period(enhanced_monitor);
+    float rpm_confidence = calculate_rpm_confidence(enhanced_monitor, current_duty, current_rpm);
+    int rpm_moving_avg = calculate_rpm_moving_average(enhanced_monitor);
+    
+    // Update confidence score
+    enhanced_monitor->rpm_confidence_score = rpm_confidence;
+    
+    // Log RPM validation results
+    if (!rpm_reading_valid || in_settling_period || rpm_confidence < 0.5) {
+        logging_info("RPM validation: valid=%s, settling=%s, confidence=%.2f, moving_avg=%d", 
+                    rpm_reading_valid ? "true" : "false",
+                    in_settling_period ? "true" : "false",
+                    rpm_confidence, rpm_moving_avg);
+    }
+    
+    // Skip stall detection if RPM reading is not reliable
+    if (!rpm_reading_valid || in_settling_period || rpm_confidence < 0.3) {
+        logging_info("Skipping stall detection: RPM reading not reliable (confidence=%.2f)", rpm_confidence);
+        monitor->last_check_duty = current_duty;
+        monitor->last_check_rpm = current_rpm;
+        monitor->last_check_time = current_time;
+        return 0;
+    }
+    
+    // Use moving average for stall detection if available
+    int rpm_for_detection = (rpm_moving_avg > 0 && enhanced_monitor->rpm_avg_count >= 3) ? 
+                           rpm_moving_avg : current_rpm;
+    
     // Check if RPMs are critically low
-    if (current_rpm < monitor->min_fan_rpm) {
+    if (rpm_for_detection < monitor->min_fan_rpm) {
         // Emergency response for critically low RPM
         logging_error("CRITICAL: Fan RPM (%d) below minimum threshold (%d)", current_rpm, monitor->min_fan_rpm);
         
@@ -184,13 +319,13 @@ int fan_health_check(fan_health_monitor_t* monitor, int current_duty, int curren
         return -1;
     }
     // Check if RPMs are below safe operating level with more realistic thresholds
-    else if (current_rpm < monitor->safe_fan_rpm || (current_rpm < expected_min_rpm * 0.5)) {
+    else if (rpm_for_detection < monitor->safe_fan_rpm || (rpm_for_detection < expected_min_rpm * 0.5)) {
         monitor->low_rpm_count++;
         enhanced_monitor->near_stall_count++;
         
         if (monitor->low_rpm_count >= 3) {  // Increased threshold to reduce false alarms
-            logging_warning("Low fan RPM detected: %d RPM at %d%% duty (expected >%d)", 
-                          current_rpm, current_duty, expected_min_rpm);
+            logging_warning("Low fan RPM detected: %d RPM (filtered: %d) at %d%% duty (expected >%d)", 
+                          current_rpm, rpm_for_detection, current_duty, expected_min_rpm);
             
             // Try immediate "kick" recovery for stuck fans
             if (current_rpm < 1000 && current_duty > 50) {
@@ -336,6 +471,14 @@ void fan_health_reset(fan_health_monitor_t* monitor) {
     enhanced_monitor->rpm_flutter_detected = false;
     enhanced_monitor->temp_spike_detected = false;
     enhanced_monitor->recovery_step_success_count = 0;
+    
+    // Reset RPM validation tracking
+    memset(enhanced_monitor->rpm_moving_average, 0, sizeof(enhanced_monitor->rpm_moving_average));
+    enhanced_monitor->rpm_avg_index = 0;
+    enhanced_monitor->rpm_avg_count = 0;
+    enhanced_monitor->settling_period_active = false;
+    enhanced_monitor->consecutive_suspicious_readings = 0;
+    enhanced_monitor->rpm_confidence_score = 1.0;
 }
 
 void fan_health_cleanup(fan_health_monitor_t* monitor) {

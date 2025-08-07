@@ -25,6 +25,12 @@
 #define FAN_CRITICAL_TEMP_THRESHOLD 95  // Critical temperature threshold (°C)
 #define FAN_EMERGENCY_SHUTDOWN_TEMP 105 // Emergency shutdown temperature (°C)
 
+// RPM reading validation constants
+#define FAN_RPM_SETTLING_TIME_MS 2000   // Time to wait after duty change before trusting RPM readings
+#define FAN_RPM_MOVING_AVERAGE_SIZE 5   // Number of readings for moving average
+#define FAN_RPM_SUSPICIOUS_THRESHOLD 50 // Duty % above which RPM=0 is suspicious
+#define FAN_RPM_MIN_VALID_READING 10    // Minimum RPM reading to consider valid
+
 // Hardware detection and calibration
 #define HARDWARE_DETECTION_ENABLED 1    // Enable hardware-specific calibration
 #define RPM_CALIBRATION_SAMPLES 10      // Number of samples for calibration
