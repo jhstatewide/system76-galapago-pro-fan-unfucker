@@ -152,7 +152,7 @@ static int max_temp_change_per_cycle = 10;  // Maximum °C change per cycle (con
 
 // Fan health monitoring variables
 static int fan_health_check_interval = 10;  // Check fan health every 10 seconds (was 30)
-static int fan_stall_prevention_threshold = 35;  // Increased minimum duty to prevent stall
+static int fan_stall_prevention_threshold = 40;  // Increased minimum duty to prevent stall
 static int fan_recovery_attempts = 0;
 static int max_fan_recovery_attempts = 3;
 static time_t last_fan_recovery_time = 0;

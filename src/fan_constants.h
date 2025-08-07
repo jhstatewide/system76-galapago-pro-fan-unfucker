@@ -4,7 +4,7 @@
 // Project-wide fan constants
 #define FAN_MIN_RPM 500        // Absolute minimum fan RPM - fan should NEVER go below this
 #define FAN_SAFE_RPM 1000      // Safe minimum fan RPM for normal operation
-#define FAN_MIN_DUTY 15        // Minimum fan duty cycle (%) to ensure minimum RPM
+#define FAN_MIN_DUTY 25        // Minimum fan duty cycle (%) to prevent stalls
 #define FAN_EMERGENCY_DUTY 60  // Emergency duty cycle when RPM drops too low
 
 // Hardware-specific RPM calibration
