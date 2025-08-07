@@ -67,13 +67,18 @@ UI_CFLAGS = `pkg-config --cflags ayatana-appindicator3-0.1`
 UI_LDFLAGS = `pkg-config --libs ayatana-appindicator3-0.1`
 
 # Default target builds both original and modular versions
-all: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET) bin/clevo-dbus-client bin/clevo-client-dbus
+all: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET) bin/clevo-dbus-client bin/clevo-client-dbus gui
 
 # Original targets (for backward compatibility)
 original: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
 
 # Modular target (optional - may have compilation issues)
 modular: $(MODULAR_TARGET)
+
+# GUI target
+gui:
+	@echo Building GUI...
+	@cd gui && mkdir -p build && cd build && cmake .. && make clevo-gui
 
 install: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET) bin/clevo-dbus-client bin/clevo-client-dbus
 	@echo Install to ${DSTDIR}/bin/
@@ -82,6 +87,10 @@ install: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET) bin/clevo-dbus-client bin/c
 	@sudo install -m 755 $(CLIENT_TARGET) ${DSTDIR}/bin/
 	@sudo install -m 755 bin/clevo-dbus-client ${DSTDIR}/bin/
 	@sudo install -m 755 bin/clevo-client-dbus ${DSTDIR}/bin/
+	@echo Building and installing GUI...
+	@cd gui && mkdir -p build && cd build && cmake .. && make clevo-gui
+	@sudo install -m 755 gui/build/bin/clevo-gui ${DSTDIR}/bin/
+	@echo GUI installed to ${DSTDIR}/bin/clevo-gui
 
 install-opt: $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET)
 	@echo Installing to ${OPT_DIR}/
@@ -190,6 +199,8 @@ $(MODULAR_TARGET): $(MODULAR_OBJ) Makefile
 
 clean:
 	rm -f $(OBJ) $(DAEMON_OBJ) $(CLIENT_OBJ) $(DBUS_CLIENT_OBJ) $(DIAG_OBJ) $(TEST_OBJ) $(MODULAR_OBJ) $(TARGET) $(DAEMON_TARGET) $(CLIENT_TARGET) $(DBUS_CLIENT_TARGET) $(DIAG_TARGET) $(TEST_TARGET) $(MODULAR_TARGET)
+	@echo Cleaning GUI...
+	@cd gui && rm -rf build
 
 # Compilation rules for original files
 $(OBJDIR)/%.o : $(SRCDIR)/%.c Makefile

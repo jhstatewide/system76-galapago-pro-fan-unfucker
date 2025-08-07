@@ -10,9 +10,9 @@
 // Hardware-specific RPM calibration
 // Based on log analysis: Galago Pro delivers ~7-10 RPM per 1% duty cycle
 // Original FAN_RPM_DUTY_RATIO 40 was 571% overestimate for this hardware
-#define FAN_RPM_DUTY_RATIO 10  // Realistic RPM per 1% duty cycle for Galago Pro
-#define GALAGO_PRO_RPM_DUTY_RATIO 10  // Specific to Galago Pro hardware
-#define GENERIC_RPM_DUTY_RATIO 40  // Fallback for other hardware
+#define FAN_RPM_DUTY_RATIO 92  // Realistic RPM per 1% duty cycle for Galago Pro
+#define GALAGO_PRO_RPM_DUTY_RATIO 92  // Specific for Galago Pro
+#define GENERIC_RPM_DUTY_RATIO 40 // Fallback for other hardware
 
 // Maximum fan RPM for this laptop model
 #define FAN_MAX_RPM 4400
