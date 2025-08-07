@@ -76,6 +76,13 @@ bool temperature_monitor_is_stuck(temperature_monitor_t* monitor);
 int temperature_monitor_get_alternative_cpu_temp(void);
 
 /**
+ * Enhanced function to get CPU temperature using standard Linux methods
+ * This function tries multiple temperature sources in order of reliability
+ * @return Temperature in degrees Celsius, -1 on error
+ */
+int temperature_monitor_get_cpu_temperature(void);
+
+/**
  * Clean up temperature monitor
  * @param monitor Temperature monitor instance
  */

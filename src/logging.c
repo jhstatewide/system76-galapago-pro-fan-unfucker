@@ -15,9 +15,7 @@ static int log_level = LOG_INFO;
 static int quiet_mode = 0;
 static int debug_mode = 0;
 
-// Timing tracking for diagnostic logging
-static struct timeval last_duty_change_time = {0, 0};
-static int last_duty_change = 0;
+// Timing tracking for diagnostic logging (unused variables removed)
 static int rpm_history[10] = {0}; // Track last 10 RPM readings
 static int rpm_history_index = 0;
 

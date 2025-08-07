@@ -50,6 +50,7 @@
 #include "utils.h"
 #include "live_stats.h"
 #include "ec_interface.h"
+#include "temperature_monitor.h"
 
 #define NAME "clevo-daemon"
 
@@ -106,9 +107,7 @@ int max_duty_increase_rate = 15;  // Increased from 10 - allow faster response t
 int max_duty_decrease_rate = 20;  // Reduced from 30 - prevent sudden drops that cause stall
 int max_duty_cycle = FAN_MAX_DUTY;  // Configurable maximum duty cycle (default: 85%)
 
-// Fan bearing protection variables
-static time_t last_duty_change_time = 0;
-static int last_duty_change_value = 0;
+// Fan bearing protection variables (used in fan health monitoring)
 
 // Live stats mode variables
 // Live stats configuration
@@ -127,23 +126,9 @@ static char debug_log_buffer[10][256];  // Last 10 log messages
 static int debug_log_index = 0;
 static int debug_log_count = 0;
 
-// PID Controller variables
-static double pid_kp = 4.0;  // Increased proportional gain for more aggressive response
-static double pid_ki = 0.3;  // Increased integral gain to eliminate steady-state error
-static double pid_kd = 1.0;  // Increased derivative gain for better damping
-static double pid_integral = 0.0;
-static double pid_prev_error = 0.0;
-static double pid_output_min = 0.0;
-static double pid_output_max = 100.0;
-static int pid_enabled = 1;  // Enable PID control by default
+// PID Controller variables (moved to ec_interface module)
 
-// Temperature trend tracking for stuck detection
-static int temp_history[10];  // Last 10 temperature readings
-static int temp_history_index = 0;
-static int temp_history_size = 0;
-static int stuck_detection_counter = 0;  // Counter for stuck temperature detection
-static int stuck_threshold_cycles = 20;  // Cycles before considering temperature stuck
-static double stuck_temp_threshold = 2.0;  // Temperature change threshold for stuck detection
+// Temperature trend tracking (moved to temperature_monitor module)
 
 // Temperature validation for sensor glitch detection
 static int last_cpu_temp = 0;
@@ -151,35 +136,19 @@ static int temp_validation_enabled = 1;  // Enable temperature validation by def
 static int max_temp_change_per_cycle = 10;  // Maximum °C change per cycle (configurable)
 
 // Fan health monitoring variables
-static int fan_health_check_interval = 10;  // Check fan health every 10 seconds (was 30)
-static int fan_stall_prevention_threshold = 40;  // Increased minimum duty to prevent stall
-static int fan_recovery_attempts = 0;
-static int max_fan_recovery_attempts = 3;
 static time_t last_fan_recovery_time = 0;
 static int fan_recovery_cooldown = 60;  // Wait 60 seconds between recovery attempts
 
-// Adaptive PID Controller variables
-static int adaptive_pid_enabled = 0;  // Disable adaptive tuning by default for stability
-static int adaptive_learning_cycles = 0;  // Number of learning cycles completed
-static double adaptive_performance_score = 0.0;  // Current performance score
-static double adaptive_prev_score = 0.0;  // Previous performance score
-static int adaptive_cycle_count = 0;  // Cycles since last tuning
-static double adaptive_temp_history[60];  // Temperature history for analysis
-static int adaptive_temp_history_index = 0;  // Current index in history
-static int adaptive_temp_history_size = 0;  // Number of samples in history
-
-// Adaptive tuning parameters
-static double adaptive_kp_step = 0.1;  // Step size for Kp adjustments
-static double adaptive_ki_step = 0.01;  // Step size for Ki adjustments  
-static double adaptive_kd_step = 0.05;  // Step size for Kd adjustments
-static int adaptive_tuning_interval = 30;  // Tuning interval in seconds
-static double adaptive_target_performance = 0.8;  // Target performance score
+// Adaptive PID Controller variables (moved to ec_interface module)
 
 // Shared memory structure
 share_info_t *share_info = NULL;
 
 // Add global variable for quiet mode
 static int quiet_mode = 0;
+
+// Temperature monitor instance
+static temperature_monitor_t* temp_monitor = NULL;
 
 // Fan health monitoring state
 static struct {
@@ -208,10 +177,8 @@ static void daemon_on_sigterm(int signum);
 static int daemon_dump_fan(void);
 static int daemon_test_fan(int duty_percentage);
 
-static int ec_io_wait(const uint32_t port, const uint32_t flag, const char value);
-static uint8_t ec_io_read(const uint32_t port);
-static int ec_io_do(const uint32_t cmd, const uint32_t port, const uint8_t value);
-static int ec_io_do_with_retry(const uint32_t cmd, const uint32_t port, const uint8_t value, int max_retries);
+// ec_io_wait function declaration removed (moved to ec_interface module)
+// EC I/O function declarations removed (moved to ec_interface module)
 static int calculate_fan_duty(int raw_duty);
 static int calculate_fan_rpms(int raw_rpm_high, int raw_rpm_low);
 static int check_proc_instances(const char* proc_name);
@@ -230,25 +197,9 @@ static void update_cooldown_state(void);
 static int get_cooldown_adjusted_duty(int requested_duty);
 
 // Alternative temperature reading functions
-static int read_temp_from_sysfs(const char* path);
-static int read_temp_from_coretemp(void);
-static int read_temp_from_hwmon(void);
-static int read_temp_from_thermal_zone(void);
-static int read_temp_from_acpi(void);
-static int get_alternative_cpu_temp(void);
-static bool validate_ec_temp_with_alternative(int ec_temp);
-static int get_cpu_temperature(void);
+// Temperature functions moved to temperature_monitor.c
 
-// Adaptive PID Controller functions
-static void adaptive_pid_add_temp_history(int temp);
-static double adaptive_pid_calculate_oscillation(void);
-static double adaptive_pid_calculate_performance_score(void);
-static void adaptive_pid_tune_parameters(void);
-
-// Temperature trend tracking functions
-static void add_temp_to_history(int temp);
-static bool is_temp_stuck(void);
-static int get_aggressive_duty_for_error(int temp_error);
+// Function declarations for moved functions removed
 
 // Temperature validation functions
 static bool validate_temperature_reading(int current_temp, int last_temp, const char* sensor_name);
@@ -303,6 +254,17 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     daemon_log(LOG_INFO, "EC interface initialized successfully");
+    
+    // Initialize temperature monitor
+    temp_monitor = temperature_monitor_init(max_temp_change_per_cycle, temp_validation_enabled);
+    if (temp_monitor == NULL) {
+        daemon_log(LOG_ERR, "Failed to initialize temperature monitor");
+        if (live_stats_config.enabled) {
+            live_stats_cleanup();
+        }
+        return EXIT_FAILURE;
+    }
+    daemon_log(LOG_INFO, "Temperature monitor initialized successfully");
     
     // Check for remaining arguments after option processing
     int fan_duty_arg = -1;
@@ -505,6 +467,11 @@ int main(int argc, char* argv[]) {
         live_stats_cleanup();
     }
     
+    // Clean up temperature monitor
+    if (temp_monitor != NULL) {
+        temperature_monitor_cleanup(temp_monitor);
+    }
+    
     // Clean up logging
     logging_cleanup();
     
@@ -576,7 +543,7 @@ static int daemon_ec_worker(void) {
                 break;
             case 0x100:
                 // Use standard Linux temperature reading instead of EC
-                int cpu_temp = get_cpu_temperature();
+                int cpu_temp = temperature_monitor_get_cpu_temperature();
                 if (cpu_temp > 0) {
                     share_info->cpu_temp = cpu_temp;
                 } else {
@@ -605,7 +572,7 @@ static int daemon_ec_worker(void) {
         if (debug_mode) daemon_log(LOG_DEBUG, "Using direct I/O for EC access");
         
         // Use standard Linux temperature reading instead of EC
-        int cpu_temp = get_cpu_temperature();
+        int cpu_temp = temperature_monitor_get_cpu_temperature();
         if (cpu_temp > 0) {
             share_info->cpu_temp = cpu_temp;
         } else {
@@ -753,120 +720,9 @@ static void daemon_on_sigterm(int signum) {
 
 
 
-static int ec_io_wait(const uint32_t port, const uint32_t flag, const char value) {
-    uint8_t data = inb(port);
-    int i = 0;
-    int max_wait = FAN_RESPONSE_TIMEOUT_MS; // Use configurable timeout
-    int retry_count = 0;
-    const int max_retries = 3;
-    
-    while (retry_count < max_retries) {
-        i = 0;
-        data = inb(port);
-        
-        while ((((data >> flag) & 0x1) != value) && (i++ < max_wait)) {
-            usleep(1000);
-            data = inb(port);
-        }
-        
-        if (i < max_wait) {
-            return EXIT_SUCCESS; // Success
-        }
-        
-        retry_count++;
-        if (retry_count < max_retries) {
-            daemon_log(LOG_WARNING, "EC communication timeout on port 0x%x, retry %d/%d", port, retry_count, max_retries);
-            usleep(10000); // Wait 10ms before retry
-        }
-    }
-    
-    daemon_log(LOG_ERR, "EC communication timeout on port 0x%x, data=0x%x, flag=0x%x, value=0x%x (waited %dms, %d retries)",
-            port, data, flag, value, max_wait, max_retries);
-    return EXIT_FAILURE;
-}
+// ec_io_wait function moved to ec_interface module
 
-static uint8_t ec_io_read(const uint32_t port) {
-    if (ec_io_wait(EC_SC, IBF, 0) != EXIT_SUCCESS) {
-        daemon_log(LOG_ERR, "EC read failed: IBF wait timeout");
-        return 0;
-    }
-    outb(EC_SC_READ_CMD, EC_SC);
-
-    if (ec_io_wait(EC_SC, IBF, 0) != EXIT_SUCCESS) {
-        daemon_log(LOG_ERR, "EC read failed: IBF wait timeout after command");
-        return 0;
-    }
-    outb(port, EC_DATA);
-
-    if (ec_io_wait(EC_SC, OBF, 1) != EXIT_SUCCESS) {
-        daemon_log(LOG_ERR, "EC read failed: OBF wait timeout");
-        return 0;
-    }
-    uint8_t value = inb(EC_DATA);
-
-    return value;
-}
-
-static int ec_io_do(const uint32_t cmd, const uint32_t port, const uint8_t value) {
-    if (ec_io_wait(EC_SC, IBF, 0) != EXIT_SUCCESS) {
-        daemon_log(LOG_ERR, "EC write failed: IBF wait timeout before command");
-        return EXIT_FAILURE;
-    }
-    outb(cmd, EC_SC);
-
-    if (ec_io_wait(EC_SC, IBF, 0) != EXIT_SUCCESS) {
-        daemon_log(LOG_ERR, "EC write failed: IBF wait timeout before port");
-        return EXIT_FAILURE;
-    }
-    outb(port, EC_DATA);
-
-    if (ec_io_wait(EC_SC, IBF, 0) != EXIT_SUCCESS) {
-        daemon_log(LOG_ERR, "EC write failed: IBF wait timeout before value");
-        return EXIT_FAILURE;
-    }
-    outb(value, EC_DATA);
-
-    return ec_io_wait(EC_SC, IBF, 0);
-}
-
-static int ec_io_do_with_retry(const uint32_t cmd, const uint32_t port, const uint8_t value, int max_retries) {
-    for (int attempt = 0; attempt < max_retries; attempt++) {
-        if (ec_io_wait(EC_SC, IBF, 0) == EXIT_SUCCESS) {
-            outb(cmd, EC_SC);
-            
-            if (ec_io_wait(EC_SC, IBF, 0) == EXIT_SUCCESS) {
-                outb(port, EC_DATA);
-                
-                if (ec_io_wait(EC_SC, IBF, 0) == EXIT_SUCCESS) {
-                    outb(value, EC_DATA);
-                    
-                    if (ec_io_wait(EC_SC, IBF, 0) == EXIT_SUCCESS) {
-                        if (attempt > 0) {
-                            daemon_log(LOG_DEBUG, "EC write succeeded on retry %d/%d for cmd=0x%x, port=0x%x, value=0x%x", 
-                                     attempt + 1, max_retries, cmd, port, value);
-                        }
-                        return EXIT_SUCCESS;
-                    }
-                }
-            }
-        }
-        
-        if (debug_mode) {
-            daemon_log(LOG_DEBUG, "EC write attempt %d/%d failed for cmd=0x%x, port=0x%x, value=0x%x", 
-                      attempt + 1, max_retries, cmd, port, value);
-        }
-        
-        if (attempt < max_retries - 1) {
-            // Wait before next retry with exponential backoff
-            int retry_delay_ms = (1 << attempt) * 5;  // 5ms, 10ms, 20ms...
-            usleep(retry_delay_ms * 1000);
-        }
-    }
-    
-    daemon_log(LOG_ERR, "EC write failed after %d retries for cmd=0x%x, port=0x%x, value=0x%x", 
-               max_retries, cmd, port, value);
-    return EXIT_FAILURE;
-}
+// EC I/O functions moved to ec_interface module
 
 static int calculate_fan_duty(int raw_duty) {
     return (int) ((double) raw_duty / 255.0 * 100.0);
@@ -1174,117 +1030,7 @@ static void daemonize(void) {
     close(STDERR_FILENO);
 }
 
-static void adaptive_pid_add_temp_history(int temp) {
-    adaptive_temp_history[adaptive_temp_history_index] = (double)temp;
-    adaptive_temp_history_index = (adaptive_temp_history_index + 1) % 60;
-    if (adaptive_temp_history_size < 60) {
-        adaptive_temp_history_size++;
-    }
-}
-
-static double adaptive_pid_calculate_oscillation(void) {
-    if (adaptive_temp_history_size < 10) return 0.0;
-    
-    double variance = 0.0;
-    double mean = 0.0;
-    
-    // Calculate mean
-    for (int i = 0; i < adaptive_temp_history_size; i++) {
-        mean += adaptive_temp_history[i];
-    }
-    mean /= adaptive_temp_history_size;
-    
-    // Calculate variance
-    for (int i = 0; i < adaptive_temp_history_size; i++) {
-        double diff = adaptive_temp_history[i] - mean;
-        variance += diff * diff;
-    }
-    variance /= adaptive_temp_history_size;
-    
-    return sqrt(variance);
-}
-
-static double adaptive_pid_calculate_performance_score(void) {
-    int temp = share_info->cpu_temp;  // Only use CPU temperature
-    double error = fabs((double)temp - (double)target_temperature);
-    double oscillation = adaptive_pid_calculate_oscillation();
-    
-    // Base score based on error (closer to target = higher score)
-    double error_score = 1.0 - (error / 50.0);  // Normalize error to 0-1
-    if (error_score < 0.0) error_score = 0.0;
-    if (error_score > 1.0) error_score = 1.0;
-    
-    // Oscillation penalty (less oscillation = higher score)
-    double oscillation_penalty = oscillation / 10.0;  // Normalize oscillation
-    if (oscillation_penalty > 1.0) oscillation_penalty = 1.0;
-    
-    // Fan efficiency penalty (lower fan usage = higher score, but only if temp is good)
-    double fan_efficiency = 1.0 - ((double)share_info->fan_duty / 100.0);
-    double fan_score = (error < 5.0) ? fan_efficiency : 0.0;  // Only consider fan efficiency if temp is close to target
-    
-    // Combine scores
-    double final_score = (error_score * 0.6) + ((1.0 - oscillation_penalty) * 0.3) + (fan_score * 0.1);
-    
-    return final_score;
-}
-
-static void adaptive_pid_tune_parameters(void) {
-    double current_score = adaptive_pid_calculate_performance_score();
-    double score_change = current_score - adaptive_prev_score;
-    
-    if (debug_mode) {
-        daemon_log(LOG_DEBUG, "Adaptive PID: Score=%.3f, Change=%.3f, Kp=%.2f, Ki=%.3f, Kd=%.2f",
-               current_score, score_change, pid_kp, pid_ki, pid_kd);
-    }
-    
-    // Adjust parameters based on performance
-    if (score_change > 0.05) {
-        // Performance improved, continue in same direction
-        if (debug_mode) daemon_log(LOG_DEBUG, "Adaptive PID: Performance improved, maintaining direction");
-    } else if (score_change < -0.05) {
-        // Performance degraded, reverse direction
-        adaptive_kp_step *= -0.8;
-        adaptive_ki_step *= -0.8;
-        adaptive_kd_step *= -0.8;
-        if (debug_mode) daemon_log(LOG_DEBUG, "Adaptive PID: Performance degraded, reversing direction");
-    }
-    
-    // Adjust Kp (proportional gain)
-    if (current_score < adaptive_target_performance) {
-        pid_kp += adaptive_kp_step;
-        if (pid_kp < 0.5) pid_kp = 0.5;
-        if (pid_kp > 5.0) pid_kp = 5.0;
-    }
-    
-    // Adjust Ki (integral gain)
-    double oscillation = adaptive_pid_calculate_oscillation();
-    int temp = share_info->cpu_temp;  // Only use CPU temperature
-    double error = fabs((double)temp - (double)target_temperature);
-    
-    if (oscillation > 3.0) {
-        // High oscillation, reduce Ki and increase Kd
-        pid_ki -= adaptive_ki_step;
-        pid_kd += adaptive_kd_step;
-    } else if (error > 5.0) {
-        // High error, increase Ki
-        pid_ki += adaptive_ki_step;
-    }
-    
-    // Clamp Ki and Kd values
-    if (pid_ki < 0.01) pid_ki = 0.01;
-    if (pid_ki > 0.5) pid_ki = 0.5;
-    if (pid_kd < 0.1) pid_kd = 0.1;
-    if (pid_kd > 2.0) pid_kd = 2.0;
-    
-    adaptive_prev_score = current_score;
-    adaptive_performance_score = current_score;
-    adaptive_learning_cycles++;
-    
-    if (debug_mode) {
-        daemon_log(LOG_DEBUG, "Adaptive PID: New parameters - Kp=%.2f, Ki=%.3f, Kd=%.2f",
-               pid_kp, pid_ki, pid_kd);
-    }
-}
+// Adaptive PID functions moved to ec_interface module
 
 // Enhanced cooldown system functions
 static void enter_cooldown_state(int state, int duration, int stable_duty) {
@@ -1619,83 +1365,7 @@ static int attempt_fan_recovery(void) {
     return EXIT_FAILURE;
 }
 
-// Temperature trend tracking functions
-static void add_temp_to_history(int temp) {
-    temp_history[temp_history_index] = temp;
-    temp_history_index = (temp_history_index + 1) % 10;
-    if (temp_history_size < 10) {
-        temp_history_size++;
-    }
-}
-
-static bool is_temp_stuck(void) {
-    if (temp_history_size < 5) {
-        return false; // Need at least 5 readings to detect stuck
-    }
-    
-    // Calculate the average temperature over the last few readings
-    int sum = 0;
-    for (int i = 0; i < temp_history_size; i++) {
-        sum += temp_history[i];
-    }
-    double avg_temp = (double)sum / temp_history_size;
-    
-    // Check if all recent temperatures are within the stuck threshold of the average
-    int stuck_count = 0;
-    int identical_count = 0;
-    int last_temp = temp_history[0];
-    
-    for (int i = 0; i < temp_history_size; i++) {
-        if (fabs(temp_history[i] - avg_temp) <= stuck_temp_threshold) {
-            stuck_count++;
-        }
-        if (temp_history[i] == last_temp) {
-            identical_count++;
-        }
-        last_temp = temp_history[i];
-    }
-    
-    // Consider temperature stuck if:
-    // 1. Most readings are within threshold of average (standard check)
-    // 2. OR we have several identical readings in a row (new check)
-    // 3. OR temperature is high and not changing despite high fan speed
-    bool stuck = (stuck_count >= temp_history_size * 0.6) || // Reduced from 0.8 to 0.6
-                (identical_count >= temp_history_size * 0.8) ||
-                (avg_temp > target_temperature + 5 && 
-                 share_info->fan_duty > 70 && 
-                 stuck_count >= temp_history_size * 0.5);
-    
-    if (stuck) {
-        stuck_detection_counter++;
-        if (debug_mode && stuck_detection_counter % 5 == 0) { // Increased frequency of debug logs
-            daemon_log(LOG_DEBUG, "Temperature stuck detection: avg=%.1f°C, stuck_count=%d/%d, identical=%d/%d, counter=%d", 
-                      avg_temp, stuck_count, temp_history_size, identical_count, temp_history_size, stuck_detection_counter);
-        }
-    } else {
-        stuck_detection_counter = 0;
-    }
-    
-    // Consider stuck if we've detected it for multiple cycles
-    // Reduced threshold for faster detection
-    return (stuck_detection_counter >= (stuck_threshold_cycles / 2));
-}
-
-static int get_aggressive_duty_for_error(int temp_error) {
-    // Progressive escalation based on temperature error
-    if (temp_error >= 12) {
-        return 100; // Emergency: 100% duty for 12°C+ error
-    } else if (temp_error >= 8) {
-        return 95;  // Very high: 95% duty for 8-11°C error
-    } else if (temp_error >= 5) {
-        return 85;  // High: 85% duty for 5-7°C error
-    } else if (temp_error >= 3) {
-        return 75;  // Moderate: 75% duty for 3-4°C error
-    } else if (temp_error >= 1) {
-        return FAN_EMERGENCY_DUTY;  // Low: emergency duty for 1-2°C error
-    } else {
-        return 0;   // No escalation needed
-    }
-}
+// Temperature trend tracking functions moved to temperature_monitor module
 
 static bool validate_temperature_reading(int current_temp, int last_temp, const char* sensor_name) {
     if (last_temp == 0) {
@@ -1743,7 +1413,7 @@ static int sanitize_temperature_reading(int current_temp, int last_temp, const c
     static int last_valid_temp = 0;
     
     // First validate with alternative temperature sources
-    if (!validate_ec_temp_with_alternative(current_temp)) {
+    if (!temperature_monitor_validate_reading(temp_monitor, current_temp, last_temp, "EC")) {
         invalid_reading_count++;
         daemon_log(LOG_WARNING, "EC temperature failed validation with alternative sources");
     }
@@ -1788,204 +1458,3 @@ static int sanitize_temperature_reading(int current_temp, int last_temp, const c
     return last_valid_temp;
 }
 
-// Alternative temperature reading functions
-static int read_temp_from_sysfs(const char* path) {
-    FILE* f = fopen(path, "r");
-    if (!f) return -1;
-    
-    int temp = -1;
-    if (fscanf(f, "%d", &temp) == 1) {
-        // Convert from millidegrees to degrees
-        temp /= 1000;
-    }
-    fclose(f);
-    return temp;
-}
-
-static int read_temp_from_coretemp(void) {
-    // Read from coretemp sensors (most reliable for CPU temperature)
-    const char* coretemp_paths[] = {
-        "/sys/class/hwmon/hwmon3/temp1_input",  // Package
-        "/sys/class/hwmon/hwmon3/temp2_input",  // Core 0
-        "/sys/class/hwmon/hwmon3/temp3_input",  // Core 1
-        "/sys/class/hwmon/hwmon3/temp4_input",  // Core 2
-        "/sys/class/hwmon/hwmon3/temp5_input",  // Core 3
-        NULL
-    };
-    
-    int max_temp = -1;
-    for (int i = 0; coretemp_paths[i] != NULL; i++) {
-        int temp = read_temp_from_sysfs(coretemp_paths[i]);
-        if (temp > 0 && temp < 120) {
-            if (temp > max_temp) {
-                max_temp = temp;
-            }
-        }
-    }
-    
-    return max_temp;
-}
-
-static int read_temp_from_hwmon(void) {
-    // Try common hwmon paths
-    const char* hwmon_paths[] = {
-        "/sys/class/hwmon/hwmon0/temp1_input",
-        "/sys/class/hwmon/hwmon1/temp1_input", 
-        "/sys/class/hwmon/hwmon2/temp1_input",
-        "/sys/class/hwmon/hwmon0/temp2_input",
-        "/sys/class/hwmon/hwmon1/temp2_input",
-        NULL
-    };
-    
-    for (int i = 0; hwmon_paths[i] != NULL; i++) {
-        int temp = read_temp_from_sysfs(hwmon_paths[i]);
-        if (temp > 0 && temp < 120) {
-            return temp;
-        }
-    }
-    return -1;
-}
-
-static int read_temp_from_thermal_zone(void) {
-    // Try thermal zone paths
-    const char* thermal_paths[] = {
-        "/sys/class/thermal/thermal_zone0/temp",
-        "/sys/class/thermal/thermal_zone1/temp",
-        "/sys/class/thermal/thermal_zone2/temp",
-        NULL
-    };
-    
-    for (int i = 0; thermal_paths[i] != NULL; i++) {
-        int temp = read_temp_from_sysfs(thermal_paths[i]);
-        if (temp > 0 && temp < 120) {
-            return temp;
-        }
-    }
-    return -1;
-}
-
-static int read_temp_from_acpi(void) {
-    // Try ACPI thermal paths
-    const char* acpi_paths[] = {
-        "/proc/acpi/thermal_zone/THM0/temperature",
-        "/proc/acpi/thermal_zone/THM1/temperature",
-        NULL
-    };
-    
-    for (int i = 0; acpi_paths[i] != NULL; i++) {
-        FILE* f = fopen(acpi_paths[i], "r");
-        if (!f) continue;
-        
-        char line[256];
-        if (fgets(line, sizeof(line), f)) {
-            // Parse ACPI format: "temperature:             45 C"
-            char* temp_str = strstr(line, "temperature:");
-            if (temp_str) {
-                temp_str += 12; // Skip "temperature:"
-                while (*temp_str == ' ' || *temp_str == '\t') temp_str++;
-                int temp = atoi(temp_str);
-                fclose(f);
-                return temp;
-            }
-        }
-        fclose(f);
-    }
-    return -1;
-}
-
-static int get_alternative_cpu_temp(void) {
-    // Try coretemp first (most reliable)
-    int temp = read_temp_from_coretemp();
-    if (temp > 0) return temp;
-    
-    // Fall back to other sources
-    temp = read_temp_from_hwmon();
-    if (temp > 0) return temp;
-    
-    temp = read_temp_from_thermal_zone();
-    if (temp > 0) return temp;
-    
-    temp = read_temp_from_acpi();
-    if (temp > 0) return temp;
-    
-    return -1;
-}
-
-// New function to get CPU temperature using standard Linux methods
-static int get_cpu_temperature(void) {
-    // Try coretemp first (most reliable for CPU temperature)
-    int temp = read_temp_from_coretemp();
-    if (temp > 0) {
-        if (debug_mode) {
-            daemon_log(LOG_DEBUG, "Using coretemp sensor: %d°C", temp);
-        }
-        return temp;
-    }
-    
-    // Fall back to other hwmon sources
-    temp = read_temp_from_hwmon();
-    if (temp > 0) {
-        if (debug_mode) {
-            daemon_log(LOG_DEBUG, "Using hwmon sensor: %d°C", temp);
-        }
-        return temp;
-    }
-    
-    // Fall back to thermal zones
-    temp = read_temp_from_thermal_zone();
-    if (temp > 0) {
-        if (debug_mode) {
-            daemon_log(LOG_DEBUG, "Using thermal zone sensor: %d°C", temp);
-        }
-        return temp;
-    }
-    
-    // Last resort: ACPI
-    temp = read_temp_from_acpi();
-    if (temp > 0) {
-        if (debug_mode) {
-            daemon_log(LOG_DEBUG, "Using ACPI sensor: %d°C", temp);
-        }
-        return temp;
-    }
-    
-    // If all else fails, return -1
-    daemon_log(LOG_WARNING, "No standard temperature sensors found");
-    return -1;
-}
-
-static bool validate_ec_temp_with_alternative(int ec_temp) {
-    static int validation_failures = 0;
-    
-    int alt_temp = get_alternative_cpu_temp();
-    if (alt_temp == -1) {
-        // No alternative source available, assume EC temp is valid
-        return true;
-    }
-    
-    int temp_diff = abs(ec_temp - alt_temp);
-    
-    // Allow some difference due to different sensor locations
-    if (temp_diff <= 15) {
-        validation_failures = 0;
-        if (debug_mode && temp_diff > 5) {
-            daemon_log(LOG_DEBUG, "Temperature validation: EC=%d°C, Alt=%d°C, diff=%d°C", 
-                      ec_temp, alt_temp, temp_diff);
-        }
-        return true;
-    }
-    
-    validation_failures++;
-    daemon_log(LOG_WARNING, "Temperature validation failed: EC=%d°C, Alt=%d°C, diff=%d°C (failures=%d)", 
-               ec_temp, alt_temp, temp_diff, validation_failures);
-    
-    // If we've had multiple validation failures, the EC sensor might be stuck
-    if (validation_failures >= 3) {
-        daemon_log(LOG_ERR, "Multiple temperature validation failures - EC sensor may be stuck");
-        return false;
-    }
-    
-    return true;
-}
-
-// Live stats implementation moved to live_stats.c module 
