@@ -2,6 +2,7 @@
 #define EC_INTERFACE_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "fan_constants.h"
 
 // EC register definitions
@@ -73,5 +74,65 @@ int ec_dump_fan(void);
  * Clean up EC interface
  */
 void ec_cleanup(void);
+
+// Auto duty adjustment configuration functions
+/**
+ * Set target temperature for auto duty adjustment
+ * @param temp Target temperature in degrees Celsius
+ */
+void ec_set_target_temperature(int temp);
+
+/**
+ * Set maximum duty cycle for auto duty adjustment
+ * @param duty Maximum duty cycle percentage (1-100)
+ */
+void ec_set_max_duty_cycle(int duty);
+
+/**
+ * Set PID controller parameters
+ * @param kp Proportional gain
+ * @param ki Integral gain
+ * @param kd Derivative gain
+ */
+void ec_set_pid_parameters(double kp, double ki, double kd);
+
+/**
+ * Set rate limiting parameters for duty changes
+ * @param max_increase Maximum duty increase per cycle
+ * @param max_decrease Maximum duty decrease per cycle
+ */
+void ec_set_rate_limits(int max_increase, int max_decrease);
+
+/**
+ * Set fan stall prevention threshold
+ * @param threshold Minimum duty cycle to prevent fan stalls
+ */
+void ec_set_stall_prevention_threshold(int threshold);
+
+/**
+ * Enable or disable PID controller
+ * @param enabled true to enable PID, false for simple control
+ */
+void ec_enable_pid(bool enabled);
+
+/**
+ * Enable or disable adaptive PID tuning
+ * @param enabled true to enable adaptive tuning
+ */
+void ec_enable_adaptive_pid(bool enabled);
+
+/**
+ * Enhanced auto duty adjustment with PID control, rate limiting, and stall prevention
+ * This function implements the complete fan control logic including:
+ * - PID controller with anti-windup
+ * - Temperature history tracking for stuck detection
+ * - Rate limiting with emergency bypass
+ * - Fan stall prevention
+ * - Critical temperature protection
+ * - Aggressive recovery for stuck fans
+ * 
+ * @return Calculated duty cycle percentage (0-100)
+ */
+int ec_auto_duty_adjust(void);
 
 #endif // EC_INTERFACE_H 
