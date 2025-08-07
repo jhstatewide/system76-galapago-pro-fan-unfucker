@@ -113,6 +113,12 @@ private:
     int chartDataIndex;
     bool chartsEnabled;
     bool chartsVisible;
+    
+    // Connection health tracking
+    qint64 lastSuccessfulResponse;  // Track last successful response time
+    int connectionHealthWindow;      // Health window in milliseconds
+    bool wasConnected;              // Track previous connection state for logging
+    bool wasDisconnected;           // Track previous disconnection state for logging
 };
 
 #endif // CLEVO_GUI_H 

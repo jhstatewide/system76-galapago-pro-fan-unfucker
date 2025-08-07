@@ -26,6 +26,7 @@
 #include <syslog.h>
 #include <stdarg.h>
 #include <time.h>
+#include <stdbool.h> // Added for bool type
 
 #define SOCKET_PATH "/run/clevo-daemon.sock"
 #define MAX_CLIENTS 10
@@ -185,25 +186,26 @@ static void* socket_server_thread(void* arg) {
                 continue;
             }
             
-            // Handle client with persistent connection
-            char buffer[BUFFER_SIZE];
-            while (socket_running) {
-                ssize_t received = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
-                if (received > 0) {
-                    buffer[received] = '\0';
-                    handle_client_command(client_sock, buffer);
-                } else if (received == 0) {
-                    // Client closed connection
-                    socket_log(LOG_INFO, "Client disconnected");
-                    break;
-                } else {
-                    // Error receiving data
-                    socket_log(LOG_ERR, "Error receiving from client: %s", strerror(errno));
-                    break;
-                }
-            }
+            // Set socket timeout to prevent hanging
+            struct timeval timeout;
+            timeout.tv_sec = 5;  // 5 second timeout
+            timeout.tv_usec = 0;
+            setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+            setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
             
-            close(client_sock);
+            // Handle client immediately to avoid blocking
+            char buffer[BUFFER_SIZE];
+            ssize_t received = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
+            if (received > 0) {
+                buffer[received] = '\0';
+                
+                // Handle all clients the same way - single command, single response
+                socket_log(LOG_INFO, "Client connected - handling command: %s", buffer);
+                handle_client_command(client_sock, buffer);
+                close(client_sock);
+            } else {
+                close(client_sock);
+            }
         }
     }
     

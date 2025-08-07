@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <cstring>
+#include <QDateTime>
 
 #define SOCKET_PATH "/run/clevo-daemon.sock"
 #define BUFFER_SIZE 1024
@@ -37,6 +38,10 @@ ClevoMonitor::ClevoMonitor(QWidget *parent)
     , chartDataIndex(0)
     , chartsEnabled(true)
     , chartsVisible(false)
+    , lastSuccessfulResponse(0)  // Track last successful response time
+    , connectionHealthWindow(5000)  // 5 second health window
+    , wasConnected(false)        // Track previous connection state for logging
+    , wasDisconnected(false)     // Track previous disconnection state for logging
 {
     // Initialize chart data vectors
     tempHistory.resize(CHART_HISTORY_SIZE);
@@ -147,7 +152,8 @@ bool ClevoMonitor::connectToDaemon()
     }
     
     socketConnected = true;
-    qDebug() << "Connected to clevo-daemon";
+    // Connection logging disabled - GUI works fine without it
+    wasConnected = true;
     return true;
 }
 
@@ -163,13 +169,18 @@ bool ClevoMonitor::sendCommand(const QString &command)
     if (sent < 0) {
         if (errno == EPIPE) {
             socketConnected = false;
-            qDebug() << "Connection to daemon lost";
+            // Disconnection logging disabled - GUI works fine without it
+            wasConnected = false;
+            wasDisconnected = true;
         } else {
             qDebug() << "Failed to send command:" << strerror(errno);
         }
         return false;
     }
     
+    // Reset the disconnection flag when we successfully send
+    wasConnected = true;
+    wasDisconnected = false;
     return true;
 }
 
@@ -215,18 +226,28 @@ void ClevoMonitor::parseStatusResponse(const QString &response)
 
 void ClevoMonitor::updateStatus()
 {
+    // Check if we're within the connection health window
+    qint64 currentTime = QDateTime::currentMSecsSinceEpoch();
+    bool withinHealthWindow = (currentTime - lastSuccessfulResponse) < connectionHealthWindow;
+    
     if (!socketConnected) {
         if (!connectToDaemon()) {
-            dataValid = false;
-            update();  // Redraw with error state
+            // Only show disconnected if we're outside the health window
+            if (!withinHealthWindow) {
+                dataValid = false;
+                update();  // Redraw with error state
+            }
             return;
         }
     }
     
     if (!sendCommand("STATUS")) {
         socketConnected = false;
-        dataValid = false;
-        update();
+        // Only show disconnected if we're outside the health window
+        if (!withinHealthWindow) {
+            dataValid = false;
+            update();
+        }
         return;
     }
     
@@ -234,11 +255,15 @@ void ClevoMonitor::updateStatus()
     if (receiveResponse(response)) {
         parseStatusResponse(response);
         updateChartData(); // Update chart data
+        lastSuccessfulResponse = currentTime;  // Update successful response time
         update();  // Trigger redraw
     } else {
         socketConnected = false;
-        dataValid = false;
-        update();
+        // Only show disconnected if we're outside the health window
+        if (!withinHealthWindow) {
+            dataValid = false;
+            update();
+        }
     }
 }
 
