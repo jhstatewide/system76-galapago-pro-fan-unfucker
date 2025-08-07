@@ -72,7 +72,7 @@ static int receive_response(int sock, char* buffer, size_t size);
 static void print_status(const char* response);
 static void print_help(void);
 static void signal_handler(int sig);
-static void monitor_loop(int sock);
+static void monitor_loop(void);
 static void parse_arguments(int argc, char* argv[]);
 static int format_json_status(const char* response, char* json_buffer, size_t size);
 
@@ -136,7 +136,7 @@ int main(int argc, char* argv[]) {
             break;
             
         case CMD_MONITOR:
-            monitor_loop(sock);
+            monitor_loop();
             break;
             
         case CMD_SET_FAN:
@@ -385,7 +385,7 @@ int main(int argc, char* argv[]) {
                             fprintf(stderr, "Live stats mode requires at least 8 rows x 40 columns\n");
                             fprintf(stderr, "Falling back to monitor mode...\n");
                             // Fall back to monitor mode
-                            monitor_loop(sock);
+                            monitor_loop();
                             return EXIT_SUCCESS;
                         }
                     }
@@ -518,17 +518,25 @@ static void print_status(const char* response) {
     }
 }
 
-static void monitor_loop(int sock) {
+static void monitor_loop(void) {
     printf("Monitoring fan control (Press Ctrl+C to stop)...\n\n");
     
     while (running) {
+        // Create a new connection for each status request
+        int current_sock = connect_to_daemon();
+        if (current_sock < 0) {
+            printf("\nFailed to connect to daemon. Retrying in %.1f seconds...\n", config.monitor_interval);
+            usleep((int)(config.monitor_interval * 1000000));
+            continue;
+        }
+        
         char command[64];
         snprintf(command, sizeof(command), "STATUS");
         
-        int send_result = send_command(sock, command);
+        int send_result = send_command(current_sock, command);
         if (send_result == 0) {
             char response[BUFFER_SIZE];
-            if (receive_response(sock, response, sizeof(response)) == 0) {
+            if (receive_response(current_sock, response, sizeof(response)) == 0) {
                 // Clear screen and print status
                 printf("\033[2J\033[H"); // Clear screen and move cursor to top
                 print_status(response);
@@ -540,17 +548,10 @@ static void monitor_loop(int sock) {
                     printf("Last updated: %s\n", time_str);
                 }
             }
-        } else if (send_result == -2) {
-            // Broken pipe - daemon connection lost
-            printf("\nConnection to daemon lost. Attempting to reconnect...\n");
-            close(sock);
-            sock = connect_to_daemon();
-            if (sock < 0) {
-                printf("Failed to reconnect to daemon. Exiting...\n");
-                break;
-            }
-            printf("Reconnected to daemon.\n");
         }
+        
+        // Close the connection after each request
+        close(current_sock);
         
         usleep((int)(config.monitor_interval * 1000000));
     }
