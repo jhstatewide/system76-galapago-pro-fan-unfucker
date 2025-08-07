@@ -183,17 +183,36 @@ int fan_health_check(fan_health_monitor_t* monitor, int current_duty, int curren
         monitor->low_rpm_count = 0;  // Reset counter after emergency response
         return -1;
     }
-    // Check if RPMs are below safe operating level
-    else if (current_rpm < monitor->safe_fan_rpm || (current_rpm < expected_min_rpm * 0.7)) {
+    // Check if RPMs are below safe operating level with more realistic thresholds
+    else if (current_rpm < monitor->safe_fan_rpm || (current_rpm < expected_min_rpm * 0.5)) {
         monitor->low_rpm_count++;
         enhanced_monitor->near_stall_count++;
         
-        if (monitor->low_rpm_count >= 2) {  // Reduced threshold for faster response
-            logging_warning("Low fan RPM detected: %d RPM at %d%% duty", 
-                          current_rpm, current_duty);
+        if (monitor->low_rpm_count >= 3) {  // Increased threshold to reduce false alarms
+            logging_warning("Low fan RPM detected: %d RPM at %d%% duty (expected >%d)", 
+                          current_rpm, current_duty, expected_min_rpm);
             
-            // Increase duty cycle by 10% or to minimum safe duty
-            int new_duty = (current_duty + 10 > 100) ? 100 : current_duty + 10;
+            // Try immediate "kick" recovery for stuck fans
+            if (current_rpm < 1000 && current_duty > 50) {
+                logging_warning("Fan appears stuck at low RPM, attempting recovery kick");
+                ec_write_fan_duty_with_retry(100, 3);  // Full speed kick
+                usleep(2000000);  // Wait 2 seconds
+                
+                int rpm_after_kick = ec_query_fan_rpms();
+                if (rpm_after_kick > current_rpm * 2) {
+                    logging_info("Fan recovery kick successful: %d -> %d RPM", current_rpm, rpm_after_kick);
+                    // Gradually step down to target duty
+                    for (int step = 90; step >= current_duty; step -= 10) {
+                        ec_write_fan_duty_with_retry(step, 3);
+                        usleep(500000);
+                    }
+                    monitor->low_rpm_count = 0;
+                    return 0;
+                }
+            }
+            
+            // Increase duty cycle by 15% for more aggressive response
+            int new_duty = (current_duty + 15 > 100) ? 100 : current_duty + 15;
             
             // CRITICAL: Ensure duty cycle will result in RPM above minimum threshold
             int min_duty_for_min_rpm = (FAN_MIN_RPM + FAN_RPM_DUTY_RATIO - 1) / FAN_RPM_DUTY_RATIO; // Ceiling division
@@ -205,7 +224,7 @@ int fan_health_check(fan_health_monitor_t* monitor, int current_duty, int curren
             ec_write_fan_duty_with_retry(new_duty, 3);
             logging_info("Increasing fan duty to %d%% to maintain safe RPM", new_duty);
             
-            if (monitor->low_rpm_count >= 4) {  // If problem persists, try recovery
+            if (monitor->low_rpm_count >= 5) {  // Increased threshold for recovery
                 fan_health_attempt_recovery(monitor);
             }
             return -1;
@@ -226,8 +245,6 @@ int fan_health_check(fan_health_monitor_t* monitor, int current_duty, int curren
 int fan_health_attempt_recovery(fan_health_monitor_t* monitor) {
     if (!monitor) return -1;
     
-    enhanced_fan_health_monitor_t* enhanced_monitor = (enhanced_fan_health_monitor_t*)monitor;
-    
     if (monitor->recovery_attempts >= monitor->max_recovery_attempts) {
         logging_error("Maximum fan recovery attempts reached (%d/%d)", 
                      monitor->recovery_attempts, monitor->max_recovery_attempts);
@@ -238,50 +255,50 @@ int fan_health_attempt_recovery(fan_health_monitor_t* monitor) {
     logging_info("Attempting fan recovery (attempt %d/%d)...", 
                 monitor->recovery_attempts, monitor->max_recovery_attempts);
     
-    // Enhanced recovery sequence with detailed logging
-    int recovery_duties[] = {60, 80, 25, 40, 25, 60, 25};
-    int num_duties = sizeof(recovery_duties) / sizeof(recovery_duties[0]);
+    // Enhanced recovery sequence with proven "kick" method
+    logging_info("Starting fan recovery with kick method...");
     
-    for (int i = 0; i < num_duties; i++) {
-        int duty = recovery_duties[i];
-        int rpm_before = ec_query_fan_rpms();
+    // Step 1: Full speed kick to overcome static friction
+    int rpm_before = ec_query_fan_rpms();
+    logging_info("Recovery step 1/3: Full speed kick (100%%)");
+    ec_write_fan_duty_with_retry(100, 3);
+    usleep(3000000);  // Wait 3 seconds for fan to respond
+    
+    int rpm_after_kick = ec_query_fan_rpms();
+    logging_recovery_step(1, 3, 100, rpm_before, rpm_after_kick, 3000, rpm_after_kick > rpm_before);
+    
+    if (rpm_after_kick > rpm_before * 2) {
+        logging_info("Fan kick successful: %d -> %d RPM", rpm_before, rpm_after_kick);
         
-        logging_info("Recovery step %d/%d: Setting fan to %d%%", 
-                  i + 1, num_duties, duty);
+        // Step 2: Gradual step-down to target duty
+        int target_duty = 60;  // Conservative target
+        logging_info("Recovery step 2/3: Gradual step-down to %d%%", target_duty);
         
-        ec_write_fan_duty_with_retry(duty, 3);
-        usleep(800000);  // Wait longer (800ms) between changes
-        
-        // Check if fan responded
-        int rpm_after = ec_query_fan_rpms();
-        bool success = (rpm_after > monitor->safe_fan_rpm);
-        
-        // Log detailed recovery step information
-        logging_recovery_step(i + 1, num_duties, duty, rpm_before, rpm_after, 800, success);
-        
-        if (success) {
-            logging_info("Fan responding at %d RPM - recovery successful", rpm_after);
+        for (int step = 90; step >= target_duty; step -= 10) {
+            ec_write_fan_duty_with_retry(step, 3);
+            usleep(1000000);  // Wait 1 second between steps
             
-            // Track successful recovery step
-            if (enhanced_monitor->recovery_step_success_count < 10) {
-                enhanced_monitor->successful_recovery_steps[enhanced_monitor->recovery_step_success_count] = i + 1;
-                enhanced_monitor->recovery_step_success_count++;
+            int rpm_after_step = ec_query_fan_rpms();
+            if (rpm_after_step < monitor->safe_fan_rpm) {
+                logging_warning("RPM dropped too low during step-down, maintaining higher duty");
+                ec_write_fan_duty_with_retry(step + 10, 3);
+                return 0;
             }
-            
-            // Gradually step down to ensure stability
-            for (int step = 90; step >= 15; step -= 10) {
-                ec_write_fan_duty_with_retry(step, 3);
-                usleep(500000);
-                rpm_after = ec_query_fan_rpms();
-                if (rpm_after < monitor->safe_fan_rpm) {
-                    // If RPM drops too low during step-down, go back to higher duty
-                    ec_write_fan_duty_with_retry(step + 20, 3);
-                    logging_info("Maintaining higher duty (%d%%) for stability", step + 20);
-                    return 0;
-                }
-            }
-            return 0;
         }
+        
+        // Step 3: Verify stability
+        logging_info("Recovery step 3/3: Verifying stability");
+        usleep(2000000);  // Wait 2 seconds
+        int final_rpm = ec_query_fan_rpms();
+        
+        if (final_rpm > monitor->safe_fan_rpm) {
+            logging_info("Fan recovery successful: stable at %d RPM", final_rpm);
+            return 0;
+        } else {
+            logging_warning("Fan recovery incomplete: RPM still low at %d", final_rpm);
+        }
+    } else {
+        logging_warning("Fan kick failed: RPM only increased from %d to %d", rpm_before, rpm_after_kick);
     }
     
     // If we get here, try one last emergency measure
