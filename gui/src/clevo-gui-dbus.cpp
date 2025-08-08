@@ -21,6 +21,7 @@ ClevoMonitor::ClevoMonitor(QWidget *parent)
     , contextMenu(nullptr)
     , settingsDialog(nullptr)
     , dbusConnected(false)
+    , dbusSubscribed(false)
     , cpuTemp(0)
     , fanDuty(0)
     , fanRpm(0)
@@ -38,7 +39,16 @@ ClevoMonitor::ClevoMonitor(QWidget *parent)
     setupWindow();
     setupTimer();
     setupDBus();
-    connectToDaemon();
+    connectToDaemonDBus();
+
+    // Connect to DBus StatusChanged signal for push updates
+    auto bus = QDBusConnection::systemBus();
+    bus.connect(DBUS_SERVICE_NAME,
+                DBUS_OBJECT_PATH,
+                DBUS_INTERFACE,
+                "StatusChanged",
+                this,
+                SLOT(onStatusChanged(int,int,int,bool)));
 }
 
 ClevoMonitor::~ClevoMonitor()
@@ -73,6 +83,7 @@ void ClevoMonitor::setupTimer()
 void ClevoMonitor::setupDBus()
 {
     dbusConnected = false;
+    dbusSubscribed = false;
 }
 
 void ClevoMonitor::setupContextMenu()
@@ -102,7 +113,7 @@ void ClevoMonitor::setupContextMenu()
     contextMenu->addAction(quitAction);
 }
 
-void ClevoMonitor::connectToDaemon()
+void ClevoMonitor::connectToDaemonDBus()
 {
     // Connect to system DBus (daemon runs on system bus)
     QDBusConnection connection = QDBusConnection::systemBus();
@@ -112,21 +123,16 @@ void ClevoMonitor::connectToDaemon()
         return;
     }
     
-    // Check if the service is available
-    QDBusReply<QStringList> reply = connection.interface()->registeredServiceNames();
-    if (reply.isValid()) {
-        QStringList services = reply.value();
-        if (services.contains(DBUS_SERVICE_NAME)) {
-            dbusConnected = true;
-            qDebug() << "Connected to DBus service:" << DBUS_SERVICE_NAME;
-            
-            // Subscribe to status updates
+    // Quick service availability check
+    QDBusReply<bool> isRegistered = connection.interface()->isServiceRegistered(DBUS_SERVICE_NAME);
+    if (isRegistered.isValid() && isRegistered.value()) {
+        dbusConnected = true;
+        qDebug() << "Connected to DBus service:" << DBUS_SERVICE_NAME;
+        if (!dbusSubscribed) {
             subscribeToStatus();
-        } else {
-            qDebug() << "DBus service not found:" << DBUS_SERVICE_NAME;
         }
     } else {
-        qDebug() << "Failed to get registered services";
+        qDebug() << "DBus service not found or not registered:" << DBUS_SERVICE_NAME;
     }
 }
 
@@ -140,9 +146,10 @@ void ClevoMonitor::subscribeToStatus()
         "SubscribeStatus"
     );
     
-    QDBusReply<QString> reply = connection.call(msg);
+    QDBusReply<QString> reply = connection.call(msg, QDBus::BlockWithGui, 1000);
     if (reply.isValid()) {
         qDebug() << "Subscribed to status updates:" << reply.value();
+        dbusSubscribed = true;
     } else {
         qDebug() << "Failed to subscribe to status updates:" << reply.error().message();
     }
@@ -158,9 +165,10 @@ void ClevoMonitor::unsubscribeFromStatus()
         "UnsubscribeStatus"
     );
     
-    QDBusReply<QString> reply = connection.call(msg);
+    QDBusReply<QString> reply = connection.call(msg, QDBus::BlockWithGui, 1000);
     if (reply.isValid()) {
         qDebug() << "Unsubscribed from status updates:" << reply.value();
+        dbusSubscribed = false;
     } else {
         qDebug() << "Failed to unsubscribe from status updates:" << reply.error().message();
     }
@@ -169,8 +177,8 @@ void ClevoMonitor::unsubscribeFromStatus()
 void ClevoMonitor::updateStatus()
 {
     if (!dbusConnected) {
-        connectToDaemon();
-        return;
+        connectToDaemonDBus();
+        // Don't mark data invalid immediately; allow a few retries to avoid flapping
     }
     
     QDBusConnection connection = QDBusConnection::systemBus();
@@ -181,7 +189,7 @@ void ClevoMonitor::updateStatus()
         "GetStatus"
     );
     
-    QDBusReply<QString> reply = connection.call(msg);
+    QDBusReply<QString> reply = connection.call(msg, QDBus::BlockWithGui, 1000);
     if (reply.isValid()) {
         QString response = reply.value();
         parseStatusResponse(response);
@@ -189,8 +197,8 @@ void ClevoMonitor::updateStatus()
         update();
     } else {
         qDebug() << "Failed to get status:" << reply.error().message();
-        dataValid = false;
-        dbusConnected = false;
+        // Soft failure: don't immediately drop connection/subscription
+        // Allow signal-driven updates to continue if subscription is active
     }
 }
 
@@ -211,7 +219,7 @@ void ClevoMonitor::parseStatusResponse(const QString &response)
     }
 }
 
-void ClevoMonitor::sendCommand(const QString &command)
+void ClevoMonitor::sendCommandDBus(const QString &command)
 {
     if (!dbusConnected) {
         qDebug() << "Not connected to daemon";
@@ -243,7 +251,7 @@ void ClevoMonitor::sendCommand(const QString &command)
         return;
     }
     
-    QDBusReply<QString> reply = connection.call(msg);
+    QDBusReply<QString> reply = connection.call(msg, QDBus::BlockWithGui, 1000);
     if (reply.isValid()) {
         qDebug() << "Command response:" << reply.value();
     } else {
@@ -254,8 +262,9 @@ void ClevoMonitor::sendCommand(const QString &command)
 void ClevoMonitor::reconnectToDaemon()
 {
     dbusConnected = false;
-    dataValid = false;
-    connectToDaemon();
+    dbusSubscribed = false;
+    // Don't clear data to avoid UI flicker
+    connectToDaemonDBus();
 }
 
 void ClevoMonitor::toggleTransparency()
@@ -302,7 +311,8 @@ void ClevoMonitor::paintEvent(QPaintEvent *event)
     QColor fanColor = getFanRpmColor(fanRpm, fanDuty);
     painter.setPen(fanColor);
     painter.setFont(QFont("Arial", 10));
-    QString fanText = QString("Fan: %1%% (%2 RPM)").arg(fanDuty).arg(fanRpm);
+    QString fanText = QString("Fan: %1").arg(fanDuty) + QLatin1Char('%') +
+                      QString(" (%1 RPM)").arg(fanRpm);
     painter.drawText(rect().adjusted(10, 40, -10, -20), Qt::AlignLeft, fanText);
     
     // Draw mode
@@ -390,6 +400,54 @@ void ClevoMonitor::closeEvent(QCloseEvent *event)
 {
     unsubscribeFromStatus();
     QWidget::closeEvent(event);
+}
+
+void ClevoMonitor::showContextMenu()
+{
+    if (!contextMenu) {
+        setupContextMenu();
+    }
+    contextMenu->popup(QCursor::pos());
+}
+
+void ClevoMonitor::quitApplication()
+{
+    QApplication::quit();
+}
+
+void ClevoMonitor::toggleCharts()
+{
+    // Charts not implemented in DBus version
+    // This is a stub to satisfy the interface
+}
+
+void ClevoMonitor::cycleDisplayLayout()
+{
+    // Display layout cycling not implemented in DBus version
+    // This is a stub to satisfy the interface
+}
+
+void ClevoMonitor::contextMenuEvent(QContextMenuEvent *event)
+{
+    if (!contextMenu) {
+        setupContextMenu();
+    }
+    contextMenu->exec(event->globalPos());
+}
+
+void ClevoMonitor::onStatusChanged(int newCpuTemp, int newFanDuty, int newFanRpm, bool newAutoMode)
+{
+    cpuTemp = newCpuTemp;
+    fanDuty = newFanDuty;
+    fanRpm = newFanRpm;
+    autoMode = newAutoMode;
+    dataValid = true;
+    dbusConnected = true;
+    if (!dbusSubscribed) {
+        // Try resubscribe once if we got a signal but think we're unsubscribed
+        subscribeToStatus();
+    }
+    update();
 }
 
 int main(int argc, char *argv[])

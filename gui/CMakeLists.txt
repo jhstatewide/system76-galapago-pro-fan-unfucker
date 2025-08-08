@@ -32,6 +32,13 @@ set(HEADERS
     src/clevo-settings.h
 )
 
+set(HEADERS_DBUS
+    src/clevo-gui.h
+    src/gui_display.h
+    src/gui_config.h
+    src/clevo-settings.h
+)
+
 # Create executable
 add_executable(clevo-gui ${SOURCES} ${HEADERS})
 
@@ -44,7 +51,7 @@ set_target_properties(clevo-gui PROPERTIES
 target_link_libraries(clevo-gui Qt6::Widgets)
 
 # Create DBus executable
-add_executable(clevo-gui-dbus ${SOURCES_DBUS} ${HEADERS})
+add_executable(clevo-gui-dbus ${SOURCES_DBUS} ${HEADERS_DBUS})
 
 # Enable Qt MOC for DBus version
 set_target_properties(clevo-gui-dbus PROPERTIES
@@ -63,6 +70,6 @@ set_target_properties(clevo-gui PROPERTIES
 )
 
 # Install target
-install(TARGETS clevo-gui
+install(TARGETS clevo-gui clevo-gui-dbus
     RUNTIME DESTINATION bin
 ) 

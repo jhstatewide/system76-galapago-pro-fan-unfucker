@@ -14,6 +14,7 @@
 #include <QPoint>
 #include <QVector>
 #include <QRect>
+#include <QCloseEvent>
 
 // Forward declaration
 class ClevoSettingsDialog;
@@ -30,8 +31,10 @@ protected:
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     void updateStatus();
@@ -41,6 +44,9 @@ private slots:
     void reconnectToDaemon();
     void openSettings();
     void toggleCharts(); // New slot for chart toggle
+    void cycleDisplayLayout();
+    // DBus signal handler
+    void onStatusChanged(int cpuTemp, int fanDuty, int fanRpm, bool autoMode);
 
 private:
     // Window properties
@@ -48,6 +54,7 @@ private:
     void setupTimer();
     void setupSocket();
     void setupContextMenu();
+    void setupDBus(); // Added for DBus implementation
     
     // Display methods
     void drawBackground(QPainter &painter);
@@ -55,6 +62,11 @@ private:
     void drawFanInfo(QPainter &painter);
     void drawModeInfo(QPainter &painter);
     void drawStatusBar(QPainter &painter);
+    void drawMiniBar(QPainter &painter);
+    
+    // Layout helpers
+    enum class DisplayLayout { Compact, Detailed, MiniBar };
+    void setDisplayLayout(DisplayLayout layout);
     
     // Chart methods (new)
     void drawSparklines(QPainter &painter);
@@ -72,6 +84,12 @@ private:
     bool sendCommand(const QString &command);
     bool receiveResponse(QString &response);
     void parseStatusResponse(const QString &response);
+    
+    // DBus methods (added for DBus implementation)
+    void connectToDaemonDBus(); // Renamed to avoid conflict
+    void sendCommandDBus(const QString &command); // Renamed to avoid conflict
+    void subscribeToStatus();
+    void unsubscribeFromStatus();
 
     // UI components
     QTimer *updateTimer;
@@ -82,6 +100,10 @@ private:
     // Socket
     int daemonSocket;
     bool socketConnected;
+    
+    // DBus connection (added for DBus implementation)
+    bool dbusConnected;
+    bool dbusSubscribed;
     
     // Display data
     int cpuTemp;
@@ -98,6 +120,7 @@ private:
     // Configuration
     int updateInterval;  // milliseconds
     double windowOpacity;
+    DisplayLayout displayLayout;
     
     // Display cache for optimization
     int lastDisplayCpuTemp;

@@ -4,6 +4,7 @@
 #include <QKeyEvent>
 #include <QMessageBox>
 #include <QDebug>
+#include "gui_config.h"
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -79,6 +80,19 @@ void ClevoMonitor::setupWindow()
     
     // Enable mouse tracking for dragging
     setMouseTracking(true);
+
+    // Default layout from settings
+    const QString layout = GuiConfig::instance().getDisplayLayout();
+    if (layout.compare("compact", Qt::CaseInsensitive) == 0) {
+        displayLayout = DisplayLayout::Compact;
+    } else if (layout.compare("detailed", Qt::CaseInsensitive) == 0) {
+        displayLayout = DisplayLayout::Detailed;
+    } else if (layout.compare("mini", Qt::CaseInsensitive) == 0 ||
+               layout.compare("minibar", Qt::CaseInsensitive) == 0) {
+        displayLayout = DisplayLayout::MiniBar;
+    } else {
+        displayLayout = DisplayLayout::Compact;
+    }
 }
 
 void ClevoMonitor::setupTimer()
@@ -107,6 +121,18 @@ void ClevoMonitor::setupContextMenu()
     QAction *settingsAction = new QAction("Settings and Commands", this);
     connect(settingsAction, &QAction::triggered, this, &ClevoMonitor::openSettings);
     contextMenu->addAction(settingsAction);
+    
+    contextMenu->addSeparator();
+
+    // Display layout submenu
+    QMenu *layoutMenu = new QMenu("Display Mode", contextMenu);
+    QAction *compactAct = layoutMenu->addAction("Compact");
+    QAction *detailedAct = layoutMenu->addAction("Detailed");
+    QAction *miniBarAct = layoutMenu->addAction("Mini bar");
+    connect(compactAct, &QAction::triggered, this, [this]() { setDisplayLayout(DisplayLayout::Compact); });
+    connect(detailedAct, &QAction::triggered, this, [this]() { setDisplayLayout(DisplayLayout::Detailed); });
+    connect(miniBarAct, &QAction::triggered, this, [this]() { setDisplayLayout(DisplayLayout::MiniBar); });
+    contextMenu->addMenu(layoutMenu);
     
     contextMenu->addSeparator();
     
@@ -279,9 +305,13 @@ void ClevoMonitor::paintEvent(QPaintEvent *event)
     
     if (dataValid) {
         // Draw status information
-        drawTemperature(painter);
-        drawFanInfo(painter);
-        drawModeInfo(painter);
+        if (displayLayout == DisplayLayout::MiniBar) {
+            drawMiniBar(painter);
+        } else {
+            drawTemperature(painter);
+            drawFanInfo(painter);
+            drawModeInfo(painter);
+        }
         
         // Draw sparklines if enabled and visible
         if (chartsEnabled && chartsVisible) {
@@ -294,8 +324,10 @@ void ClevoMonitor::paintEvent(QPaintEvent *event)
         painter.drawText(rect(), Qt::AlignCenter, "No Connection\nCheck clevo-daemon");
     }
     
-    // Draw status bar
-    drawStatusBar(painter);
+    // Draw status bar except in MiniBar layout
+    if (displayLayout != DisplayLayout::MiniBar) {
+        drawStatusBar(painter);
+    }
 }
 
 void ClevoMonitor::drawBackground(QPainter &painter)
@@ -426,9 +458,29 @@ void ClevoMonitor::keyPressEvent(QKeyEvent *event)
         case Qt::Key_C:
             toggleCharts();
             break;
+        case Qt::Key_M:
+            cycleDisplayLayout();
+            break;
         default:
             QWidget::keyPressEvent(event);
     }
+}
+
+void ClevoMonitor::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton) {
+        isDragging = false;
+    }
+}
+
+void ClevoMonitor::closeEvent(QCloseEvent *event)
+{
+    // Close socket connection if open
+    if (daemonSocket >= 0) {
+        ::close(daemonSocket);
+        daemonSocket = -1;
+    }
+    QWidget::closeEvent(event);
 }
 
 void ClevoMonitor::toggleTransparency()
@@ -547,8 +599,11 @@ void ClevoMonitor::drawSparkline(QPainter &painter, const QVector<int> &data,
 
 void ClevoMonitor::toggleCharts()
 {
-    chartsVisible = !chartsVisible;
-    
+    // In MiniBar layout, charts are not shown; ignore toggle
+    if (displayLayout == DisplayLayout::MiniBar) {
+        chartsVisible = false;
+        return;
+    }
     // Resize window based on chart visibility
     if (chartsVisible) {
         resize(220, 160); // Larger window for charts
@@ -556,6 +611,87 @@ void ClevoMonitor::toggleCharts()
         resize(200, 100); // Original size
     }
     
+    update();
+}
+
+void ClevoMonitor::drawMiniBar(QPainter &painter)
+{
+    // Minimal horizontal bar: [CPU 47°C • 24% • 2736 RPM • Auto]
+    // Compact vertical padding; no status bar in MiniBar
+    QRect r = rect().adjusted(8, 4, -8, -4);
+    QFont font("Arial", 10);
+    painter.setFont(font);
+    QFontMetrics fm(font);
+    int baselineY = r.top() + fm.ascent();
+
+    // Left colored segment for temperature
+    QString left = QString("CPU %1°C").arg(cpuTemp);
+    painter.setPen(getTemperatureColor(cpuTemp));
+    painter.drawText(r.left(), baselineY, left);
+
+    // Separator width accounts for spacing and bullet
+    const QString sep = "  •  ";
+    int leftWidth = fm.horizontalAdvance(left + sep);
+
+    // Right segment text, elided to fit available width
+    painter.setPen(Qt::white);
+    QString right = QString("%1%  •  %2 RPM  •  %3")
+                        .arg(fanDuty)
+                        .arg(fanRpm)
+                        .arg(autoMode ? "Auto" : "Manual");
+    int availableWidth = qMax(0, r.width() - leftWidth);
+    QString elidedRight = fm.elidedText(right, Qt::ElideRight, availableWidth);
+    painter.drawText(r.left() + leftWidth, baselineY, elidedRight);
+}
+
+void ClevoMonitor::setDisplayLayout(DisplayLayout layout)
+{
+    displayLayout = layout;
+    // Persist setting
+    switch (displayLayout) {
+        case DisplayLayout::Compact:
+            GuiConfig::instance().setDisplayLayout("compact");
+            // Restore typical window size for compact
+            resize(200, 100);
+            break;
+        case DisplayLayout::Detailed:
+            GuiConfig::instance().setDisplayLayout("detailed");
+            // Provide a bit more space for detailed layout
+            resize(240, 140);
+            break;
+        case DisplayLayout::MiniBar:
+            GuiConfig::instance().setDisplayLayout("minibar");
+            // Compact height for MiniBar; width can be adjusted by user
+            resize(qMax(width(), 360), 28);
+            chartsVisible = false; // No charts in MiniBar
+            break;
+    }
+    update();
+}
+
+void ClevoMonitor::cycleDisplayLayout()
+{
+    switch (displayLayout) {
+        case DisplayLayout::Compact:
+            setDisplayLayout(DisplayLayout::Detailed);
+            break;
+        case DisplayLayout::Detailed:
+            setDisplayLayout(DisplayLayout::MiniBar);
+            break;
+        case DisplayLayout::MiniBar:
+            setDisplayLayout(DisplayLayout::Compact);
+            break;
+    }
+}
+
+// DBus slot stub for socket-based build
+void ClevoMonitor::onStatusChanged(int newCpuTemp, int newFanDuty, int newFanRpm, bool newAutoMode)
+{
+    cpuTemp = newCpuTemp;
+    fanDuty = newFanDuty;
+    fanRpm = newFanRpm;
+    autoMode = newAutoMode;
+    dataValid = true;
     update();
 }
 

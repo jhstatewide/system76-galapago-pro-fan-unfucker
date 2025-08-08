@@ -342,7 +342,16 @@ int main(int argc, char* argv[]) {
             broadcast_status_update(share_info->cpu_temp, share_info->fan_duty, 
                                  share_info->fan_rpms, share_info->auto_duty);
             
-            usleep((int)(status_interval * 1000000)); // Convert to microseconds
+            // Sleep in short chunks and continue processing DBus to keep latency low
+            int sleep_us = (int)(status_interval * 1000000);
+            const int check_interval = 50000; // 50ms
+            while (sleep_us > 0 && running) {
+                int sleep_chunk = (sleep_us > check_interval) ? check_interval : sleep_us;
+                usleep(sleep_chunk);
+                sleep_us -= sleep_chunk;
+                // Process any pending DBus messages during sleep
+                process_dbus_messages();
+            }
         }
         
         // Stop socket server

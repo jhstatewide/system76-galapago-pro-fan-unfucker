@@ -319,9 +319,11 @@ void ClevoSettingsDialog::updateConnectionStatus()
 
 bool ClevoSettingsDialog::sendCommand(const QString &command)
 {
+    // Ensure connection (server expects single-command connections)
     if (!socketConnected || daemonSocket < 0) {
-        appendOutput("Not connected to daemon");
-        return false;
+        if (!connectToDaemon()) {
+            return false;
+        }
     }
     
     QByteArray data = command.toUtf8();
@@ -329,12 +331,22 @@ bool ClevoSettingsDialog::sendCommand(const QString &command)
     
     if (sent < 0) {
         if (errno == EPIPE) {
+            // Server likely closed previous connection; reconnect and retry once
             socketConnected = false;
-            appendOutput("Connection to daemon lost");
+            ::close(daemonSocket);
+            daemonSocket = -1;
+            if (!connectToDaemon()) {
+                return false;
+            }
+            sent = send(daemonSocket, data.constData(), data.size(), MSG_NOSIGNAL);
+            if (sent < 0) {
+                appendOutput("Failed to send command after reconnect: " + QString(strerror(errno)));
+                return false;
+            }
         } else {
             appendOutput("Failed to send command: " + QString(strerror(errno)));
+            return false;
         }
-        return false;
     }
     
     return true;
@@ -376,6 +388,12 @@ bool ClevoSettingsDialog::receiveResponse(QString &response)
     
     buffer[received] = '\0';
     response = QString::fromUtf8(buffer);
+    // Server uses one-request-per-connection; close locally to avoid EPIPE on next command
+    if (daemonSocket >= 0) {
+        ::close(daemonSocket);
+        daemonSocket = -1;
+        socketConnected = false;
+    }
     return true;
 }
 
