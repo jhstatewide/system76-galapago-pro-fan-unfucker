@@ -446,15 +446,23 @@ int ec_auto_duty_adjust(void) {
     int max_increase = ec_auto_config.max_duty_increase_rate;
     int max_decrease = ec_auto_config.max_duty_decrease_rate;
     
-    // Stall prevention: Never go below minimum safe duty
-    if (new_duty < ec_auto_config.fan_stall_prevention_threshold && temp > ec_auto_config.target_temperature) {
-        logging_telemetry("Duty cycle %d%% below stall prevention threshold, adjusting to %d%%", 
-                  new_duty, ec_auto_config.fan_stall_prevention_threshold);
+    // Temperature-context stall prevention: Only enforce minimum duty when not in critical temperature
+    bool critical_temp_bypass = (temp_error >= 8) || (temp >= ec_auto_config.target_temperature + 10);
+    
+    if (new_duty < ec_auto_config.fan_stall_prevention_threshold && temp > ec_auto_config.target_temperature && !critical_temp_bypass) {
+        logging_telemetry("Duty cycle %d%% below stall prevention threshold, adjusting to %d%% (temp=%d, target=%d)", 
+                  new_duty, ec_auto_config.fan_stall_prevention_threshold, temp, ec_auto_config.target_temperature);
         new_duty = ec_auto_config.fan_stall_prevention_threshold;
+    } else if (critical_temp_bypass && new_duty < ec_auto_config.fan_stall_prevention_threshold) {
+        logging_telemetry("Critical temperature bypass: allowing duty %d%% below stall threshold (temp=%d, error=%d°C)", 
+                  new_duty, temp, temp_error);
     }
     
     // Emergency bypass: Allow faster rate limiting for critical temperature situations
     bool emergency_bypass = (temp_error >= 8) || (temp_error >= 5 && new_duty >= 80) || temp_stuck;
+    
+    // High duty stall prevention: Avoid very high duty cycles if fan has been stuck recently (but allow for critical temps)
+    bool high_duty_stall_prevention = (new_duty > 80) && (temp_error < 5) && (temp < ec_auto_config.target_temperature + 8);
     
     // Critical bypass: For very high temperatures, bypass rate limiting entirely
     bool critical_bypass = (temp_error >= 12) || (temp >= ec_auto_config.target_temperature + 15);
@@ -462,9 +470,9 @@ int ec_auto_duty_adjust(void) {
     // Cool-down bypass: For temperatures significantly below target, allow faster fan reduction
     bool cooldown_bypass = (temp_error <= -5) || (temp <= ec_auto_config.target_temperature - 8);
     
-    // Stall prevention bypass: If fan is at risk of stalling, be more conservative
+    // Stall prevention bypass: If fan is at risk of stalling, be more conservative (but allow critical temp bypass)
     bool stall_prevention_bypass = (current_duty <= ec_auto_config.fan_stall_prevention_threshold + 5) && 
-                                  (new_duty < current_duty) && (temp > ec_auto_config.target_temperature);
+                                  (new_duty < current_duty) && (temp > ec_auto_config.target_temperature) && !critical_temp_bypass;
     
     if (debug_mode) {
         logging_debug("Rate limiting check: current_duty=%d, new_duty=%d, temp_error=%d, emergency_bypass=%s, critical_bypass=%s, cooldown_bypass=%s, stall_prevention_bypass=%s", 
@@ -474,6 +482,16 @@ int ec_auto_duty_adjust(void) {
     }
     
     if (!emergency_bypass && !stall_prevention_bypass) {
+        // High duty stall prevention: Limit duty to 80% unless temperature is critical
+        if (high_duty_stall_prevention) {
+            int original_duty = new_duty;
+            new_duty = 80;
+            if (debug_mode) {
+                logging_debug("High duty stall prevention: limiting duty from %d%% to 80%% (temp=%d, error=%d°C)", 
+                             original_duty, temp, temp_error);
+            }
+        }
+        
         // Normal rate limiting with improved stall prevention
         if (new_duty > current_duty + max_increase) {
             int original_duty = new_duty;
@@ -486,11 +504,15 @@ int ec_auto_duty_adjust(void) {
             int original_duty = new_duty;
             new_duty = current_duty - max_decrease;
             
-            // Additional stall prevention: If we're reducing duty and near stall threshold, be more conservative
-            if (new_duty < ec_auto_config.fan_stall_prevention_threshold + 10 && temp > ec_auto_config.target_temperature) {
+            // Additional stall prevention: If we're reducing duty and near stall threshold, be more conservative (but allow critical temp bypass)
+            if (new_duty < ec_auto_config.fan_stall_prevention_threshold + 10 && temp > ec_auto_config.target_temperature && !critical_temp_bypass) {
                 new_duty = MAX(new_duty, ec_auto_config.fan_stall_prevention_threshold);
                 if (debug_mode) {
                     logging_debug("Stall prevention: limiting duty decrease to %d%% (near stall threshold)", new_duty);
+                }
+            } else if (critical_temp_bypass && new_duty < ec_auto_config.fan_stall_prevention_threshold + 10) {
+                if (debug_mode) {
+                    logging_debug("Critical temp bypass: allowing duty decrease to %d%% (temp=%d, error=%d°C)", new_duty, temp, temp_error);
                 }
             }
             
