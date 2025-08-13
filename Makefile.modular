@@ -27,7 +27,6 @@ MODULAR_SRCS = src/main_new.c \
                $(FAN_HEALTH_SRCS) \
                $(DAEMON_SRCS) \
                $(LIVE_STATS_SRCS) \
-               src/clevo-daemon-socket.c \
                src/privilege_manager.c
 
 # Object files
@@ -42,8 +41,7 @@ HEADERS = src/utils.h \
           src/pid_controller.h \
           src/fan_health.h \
           src/daemon.h \
-          src/live_stats.h \
-          src/clevo-daemon-socket.h \
+           src/live_stats.h \
           src/privilege_manager.h
 
 # Target executable
@@ -89,8 +87,6 @@ src/daemon.o: src/daemon.c src/daemon.h src/logging.h src/utils.h
 src/live_stats.o: src/live_stats.c src/live_stats.h src/logging.h src/utils.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-src/clevo-daemon-socket.o: src/clevo-daemon-socket.c src/clevo-daemon-socket.h
-	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/privilege_manager.o: src/privilege_manager.c src/privilege_manager.h
 	$(CC) $(CFLAGS) -c -o $@ $<

@@ -11,8 +11,8 @@ SRCDIR := src
 
 # Original monolithic source files
 SRC = clevo-indicator.c privilege_manager.c
-DAEMON_SRC = clevo-daemon.c clevo-daemon-socket.c clevo-daemon-dbus.c privilege_manager.c logging.c utils.c fan_health.c ec_interface.c live_stats.c temperature_monitor.c
-CLIENT_SRC = clevo-client.c
+DAEMON_SRC = clevo-daemon.c clevo-daemon-dbus.c privilege_manager.c logging.c utils.c fan_health.c ec_interface.c live_stats.c temperature_monitor.c clevo_ipc.c
+CLIENT_SRC = clevo-client.c clevo_ipc.c
 DBUS_CLIENT_SRC = clevo-dbus-client.c
 DIAG_SRC = ec_diagnostic.c
 TEST_SRC = test_settings.c
@@ -28,7 +28,6 @@ MODULAR_SRCS = main_new.c \
                fan_health.c \
                daemon.c \
                live_stats.c \
-               clevo-daemon-socket.c \
                privilege_manager.c
 
 # Object files
@@ -162,7 +161,7 @@ $(DAEMON_TARGET): $(DAEMON_OBJ) Makefile
 $(CLIENT_TARGET): $(CLIENT_OBJ) Makefile
 	@mkdir -p bin
 	@echo linking $(CLIENT_TARGET) from $(CLIENT_OBJ)
-	@$(CC) $(CLIENT_OBJ) -o $(CLIENT_TARGET) $(LDFLAGS) -lm -lncurses
+	@$(CC) $(CLIENT_OBJ) -o $(CLIENT_TARGET) $(LDFLAGS) -lm -lncurses -ldbus-1
 
 $(DBUS_CLIENT_TARGET): $(DBUS_CLIENT_OBJ) Makefile
 	@mkdir -p bin

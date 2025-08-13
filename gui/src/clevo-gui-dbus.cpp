@@ -210,7 +210,7 @@ void ClevoMonitor::parseStatusResponse(const QString &response)
         if (part.startsWith("CPU:")) {
             cpuTemp = part.mid(4).toInt();
         } else if (part.startsWith("FAN_DUTY:")) {
-            fanDuty = part.mid(10).toInt();
+            fanDuty = part.mid(9).toInt();
         } else if (part.startsWith("FAN_RPM:")) {
             fanRpm = part.mid(8).toInt();
         } else if (part.startsWith("AUTO:")) {

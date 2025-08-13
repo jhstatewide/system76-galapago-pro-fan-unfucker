@@ -6,7 +6,7 @@ A compact, transparent X11 utility for displaying fan RPM and temperature inform
 ## Technology Stack
 - **Framework**: Qt 6 with QWidget (not QML for lightweight approach)
 - **Language**: C++
-- **Communication**: Unix domain socket with clevo-daemon
+- **Communication**: D-Bus system bus interface with clevo-daemon
 - **Rendering**: QPainter for custom compact display
 - **Transparency**: Qt's native transparency support through KDE compositor
 
@@ -14,7 +14,7 @@ A compact, transparent X11 utility for displaying fan RPM and temperature inform
 
 ### Core Components
 1. **Main Application**: Qt application with transparent, frameless window
-2. **Socket Communication**: Non-blocking communication with clevo-daemon
+2. **IPC Communication**: D-Bus communication with clevo-daemon
 3. **Custom Display**: QPainter-based compact information display
 4. **Timer System**: Periodic status updates (configurable interval)
 5. **User Interaction**: Mouse events for dragging, context menu
@@ -143,11 +143,14 @@ void ClevoMonitor::paintEvent(QPaintEvent *event) {
 }
 ```
 
-### Socket Communication
+### D-Bus Communication
 ```cpp
-// Non-blocking socket communication
-QSocketNotifier *socketNotifier = new QSocketNotifier(daemonSocket, QSocketNotifier::Read);
-connect(socketNotifier, &QSocketNotifier::activated, this, &ClevoMonitor::readDaemonData);
+// Example D-Bus call (Qt)
+QDBusMessage msg = QDBusMessage::createMethodCall("org.freedesktop.ClevoDaemon",
+                                                 "/org/freedesktop/ClevoDaemon",
+                                                 "org.freedesktop.ClevoDaemon",
+                                                 "GetStatus");
+QDBusMessage reply = QDBusConnection::systemBus().call(msg, QDBus::Block);
 ```
 
 ### Timer Updates

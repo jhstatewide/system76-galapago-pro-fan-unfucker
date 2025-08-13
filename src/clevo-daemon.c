@@ -42,7 +42,9 @@
 #include <ncurses.h>
 
 #include "privilege_manager.h"
+#if 0
 #include "clevo-daemon-socket.h"
+#endif
 #include "clevo-daemon-dbus.h"
 #include "logging.h"
 #include "fan_constants.h"
@@ -282,11 +284,7 @@ int main(int argc, char* argv[]) {
         // TODO: Re-enable daemonization for non-systemd usage
         daemon_log(LOG_INFO, "Running in foreground mode (daemonization disabled)");
         
-        // Initialize socket server
-        if (init_socket_server() != 0) {
-            daemon_log(LOG_ERR, "Failed to initialize socket server");
-            return EXIT_FAILURE;
-        }
+        // UDS removed: DBus is the primary IPC
         
         // Initialize DBus interface with enhanced error handling
         daemon_log(LOG_INFO, "Attempting to initialize DBus interface...");
@@ -354,8 +352,7 @@ int main(int argc, char* argv[]) {
             }
         }
         
-        // Stop socket server
-        stop_socket_server();
+        // UDS removed
         
         // Stop DBus interface
         stop_dbus_interface();
@@ -380,11 +377,7 @@ int main(int argc, char* argv[]) {
                 daemonize();
             }
             
-            // Initialize socket server
-            if (init_socket_server() != 0) {
-                daemon_log(LOG_ERR, "Failed to initialize socket server");
-                return EXIT_FAILURE;
-            }
+            // UDS removed
             
             // Initialize DBus interface with enhanced error handling
             daemon_log(LOG_INFO, "Attempting to initialize DBus interface...");
@@ -456,8 +449,7 @@ int main(int argc, char* argv[]) {
                 }
             }
             
-            // Stop socket server
-            stop_socket_server();
+            // UDS removed
             
             // Stop DBus interface
             stop_dbus_interface();

@@ -5,8 +5,8 @@
  Version     : 1.0
  Description : Modern client for Clevo fan control daemon
 
- This client provides a command-line interface to interact with the clevo-daemon
- using Unix domain sockets for efficient local communication.
+  This client provides a command-line interface to interact with the clevo-daemon
+  using D-Bus on the system bus for local communication.
 
  ============================================================================
  */
@@ -15,8 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include <errno.h>
 #include <getopt.h>
 #include <signal.h>
@@ -25,7 +23,6 @@
 #include <sys/ioctl.h>
 #include <ncurses.h>
 
-#define SOCKET_PATH "/run/clevo-daemon.sock"
 #define BUFFER_SIZE 1024
 #define MAX_RETRIES 3
 
@@ -65,10 +62,9 @@ typedef struct {
 static ClientConfig config = {0};
 static volatile int running = 1;
 
-// Function declarations
-static int connect_to_daemon(void);
-static int send_command(int sock, const char* command);
-static int receive_response(int sock, char* buffer, size_t size);
+// Function declarations (now via shared D-Bus IPC)
+#include "clevo_ipc.h"
+static ClevoIpc *ipc_handle = NULL;
 static void print_status(const char* response);
 static void print_help(void);
 static void signal_handler(int sig);
@@ -106,10 +102,9 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     
-    // Connect to daemon
-    int sock = connect_to_daemon();
-    if (sock < 0) {
-        fprintf(stderr, "Failed to connect to daemon. Is clevo-daemon running?\n");
+    // Connect to daemon via D-Bus IPC
+    if (clevo_ipc_client_new(&ipc_handle) != 0) {
+        fprintf(stderr, "Failed to connect to daemon (DBus). Is clevo-daemon running?\n");
         return EXIT_FAILURE;
     }
     
@@ -117,19 +112,17 @@ int main(int argc, char* argv[]) {
     switch (config.type) {
         case CMD_STATUS:
             {
-                char command[64];
-                snprintf(command, sizeof(command), "STATUS");
-                if (send_command(sock, command) == 0) {
+                ClevoStatus st;
+                if (clevo_get_status(ipc_handle, &st) == 0) {
                     char response[BUFFER_SIZE];
-                    if (receive_response(sock, response, sizeof(response)) == 0) {
-                        if (config.json_output) {
-                            char json_buffer[BUFFER_SIZE];
-                            if (format_json_status(response, json_buffer, sizeof(json_buffer)) == 0) {
-                                printf("%s\n", json_buffer);
-                            }
-                        } else {
-                            print_status(response);
+                    snprintf(response, sizeof(response), "CPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d", st.cpu_temp, st.fan_duty, st.fan_rpm, st.auto_mode);
+                    if (config.json_output) {
+                        char json_buffer[BUFFER_SIZE];
+                        if (format_json_status(response, json_buffer, sizeof(json_buffer)) == 0) {
+                            printf("%s\n", json_buffer);
                         }
+                    } else {
+                        print_status(response);
                     }
                 }
             }
@@ -141,52 +134,33 @@ int main(int argc, char* argv[]) {
             
         case CMD_SET_FAN:
             {
-                char command[64];
-                snprintf(command, sizeof(command), "SET_FAN %d", config.fan_duty);
-                if (send_command(sock, command) == 0) {
-                    char response[BUFFER_SIZE];
-                    if (receive_response(sock, response, sizeof(response)) == 0) {
-                        printf("Response: %s\n", response);
-                    }
+                if (clevo_set_fan_duty(ipc_handle, config.fan_duty) == 0) {
+                    printf("Response: OK\n");
                 }
             }
             break;
             
         case CMD_SET_AUTO:
             {
-                char command[64];
-                snprintf(command, sizeof(command), "SET_AUTO");
-                if (send_command(sock, command) == 0) {
-                    char response[BUFFER_SIZE];
-                    if (receive_response(sock, response, sizeof(response)) == 0) {
-                        printf("Response: %s\n", response);
-                    }
+                if (clevo_set_auto_mode(ipc_handle, 1) == 0) {
+                    printf("Response: OK\n");
                 }
             }
             break;
             
         case CMD_SET_TARGET_TEMP:
             {
-                char command[64];
-                snprintf(command, sizeof(command), "SET_TARGET_TEMP %d", config.target_temperature);
-                if (send_command(sock, command) == 0) {
-                    char response[BUFFER_SIZE];
-                    if (receive_response(sock, response, sizeof(response)) == 0) {
-                        printf("Response: %s\n", response);
-                    }
+                if (clevo_set_target_temp(ipc_handle, config.target_temperature) == 0) {
+                    printf("Response: OK\n");
                 }
             }
             break;
             
         case CMD_GET_TEMP:
             {
-                char command[64];
-                snprintf(command, sizeof(command), "GET_TEMP");
-                if (send_command(sock, command) == 0) {
-                    char response[BUFFER_SIZE];
-                    if (receive_response(sock, response, sizeof(response)) == 0) {
-                        int cpu_temp;
-                        if (sscanf(response, "CPU:%d", &cpu_temp) == 1) {
+                ClevoStatus st;
+                if (clevo_get_status(ipc_handle, &st) == 0) {
+                        int cpu_temp = st.cpu_temp;
                             printf("Current Temperatures:\n");
                             printf("  CPU: %d°C\n", cpu_temp);
                             
@@ -201,10 +175,6 @@ int main(int argc, char* argv[]) {
                             } else {
                                 printf("  Status: \033[32mNORMAL\033[0m (Good)\n");
                             }
-                        } else {
-                            printf("Temperature: %s\n", response);
-                        }
-                    }
                 }
             }
             break;
@@ -216,41 +186,35 @@ int main(int argc, char* argv[]) {
                 printf("----\t\t---\t------\n");
                 
                 while (running) {
-                    char command[64];
-                    snprintf(command, sizeof(command), "GET_TEMP");
-                    if (send_command(sock, command) == 0) {
-                        char response[BUFFER_SIZE];
-                        if (receive_response(sock, response, sizeof(response)) == 0) {
-                            int cpu_temp;
-                            if (sscanf(response, "CPU:%d", &cpu_temp) == 1) {
-                                time_t now = time(NULL);
-                                struct tm *tm_info = localtime(&now);
-                                char time_str[20];
-                                strftime(time_str, sizeof(time_str), "%H:%M:%S", tm_info);
-                                
-                                // Determine status color and message
-                                const char* status_color = "";
-                                const char* status_msg = "";
-                                int max_temp = cpu_temp;
-                                
-                                if (max_temp >= 80) {
-                                    status_color = "\033[31m";  // Red
-                                    status_msg = "CRITICAL";
-                                } else if (max_temp >= 70) {
-                                    status_color = "\033[33m";  // Yellow
-                                    status_msg = "HIGH";
-                                } else if (max_temp >= 60) {
-                                    status_color = "\033[36m";  // Cyan
-                                    status_msg = "WARM";
-                                } else {
-                                    status_color = "\033[32m";  // Green
-                                    status_msg = "NORMAL";
-                                }
-                                
-                                printf("%s\t%d°C\t%s%s\033[0m\n", 
-                                       time_str, cpu_temp, status_color, status_msg);
-                            }
+                    ClevoStatus st;
+                    if (clevo_get_status(ipc_handle, &st) == 0) {
+                        int cpu_temp = st.cpu_temp;
+                        time_t now = time(NULL);
+                        struct tm *tm_info = localtime(&now);
+                        char time_str[20];
+                        strftime(time_str, sizeof(time_str), "%H:%M:%S", tm_info);
+                        
+                        // Determine status color and message
+                        const char* status_color = "";
+                        const char* status_msg = "";
+                        int max_temp = cpu_temp;
+                        
+                        if (max_temp >= 80) {
+                            status_color = "\033[31m";  // Red
+                            status_msg = "CRITICAL";
+                        } else if (max_temp >= 70) {
+                            status_color = "\033[33m";  // Yellow
+                            status_msg = "HIGH";
+                        } else if (max_temp >= 60) {
+                            status_color = "\033[36m";  // Cyan
+                            status_msg = "WARM";
+                        } else {
+                            status_color = "\033[32m";  // Green
+                            status_msg = "NORMAL";
                         }
+                        
+                        printf("%s\t%d°C\t%s%s\033[0m\n", 
+                               time_str, cpu_temp, status_color, status_msg);
                     }
                     usleep((int)(config.monitor_interval * 1000000));
                 }
@@ -259,110 +223,59 @@ int main(int argc, char* argv[]) {
             
         case CMD_GET_FAN:
             {
-                char command[64];
-                snprintf(command, sizeof(command), "GET_FAN");
-                if (send_command(sock, command) == 0) {
-                    char response[BUFFER_SIZE];
-                    if (receive_response(sock, response, sizeof(response)) == 0) {
-                        printf("Fan: %s\n", response);
-                    }
+                ClevoStatus st;
+                if (clevo_get_status(ipc_handle, &st) == 0) {
+                    printf("Fan: DUTY:%d RPM:%d AUTO:%d\n", st.fan_duty, st.fan_rpm, st.auto_mode);
                 }
             }
             break;
             
         case CMD_SET_MAX_DUTY_CHANGE:
             {
-                char command[64];
-                snprintf(command, sizeof(command), "SET_MAX_DUTY_CHANGE %d", config.max_duty_change_rate);
-                if (send_command(sock, command) == 0) {
-                    char response[BUFFER_SIZE];
-                    if (receive_response(sock, response, sizeof(response)) == 0) {
-                        printf("Response: %s\n", response);
-                    }
+                if (clevo_set_max_duty_change(ipc_handle, config.max_duty_change_rate) == 0) {
+                    printf("Response: OK\n");
                 }
             }
             break;
             
         case CMD_GET_MAX_DUTY_CHANGE:
             {
-                char command[64];
-                snprintf(command, sizeof(command), "GET_MAX_DUTY_CHANGE");
-                if (send_command(sock, command) == 0) {
-                    char response[BUFFER_SIZE];
-                    if (receive_response(sock, response, sizeof(response)) == 0) {
-                        int rate;
-                        if (sscanf(response, "MAX_DUTY_CHANGE:%d", &rate) == 1) {
-                            printf("Current max duty change rate: %d%%\n", rate);
-                        } else {
-                            printf("Response: %s\n", response);
-                        }
-                    }
+                int rate;
+                if (clevo_get_max_duty_change(ipc_handle, &rate) == 0) {
+                    printf("Current max duty change rate: %d%%\n", rate);
                 }
             }
             break;
             
         case CMD_SET_MAX_DUTY_INCREASE: {
-            char command[64];
-            snprintf(command, sizeof(command), "SET_MAX_DUTY_INCREASE %d", config.max_duty_increase_rate);
-            if (send_command(sock, command) == 0) {
-                char response[BUFFER_SIZE];
-                if (receive_response(sock, response, sizeof(response)) == 0) {
-                    printf("Response: %s\n", response);
-                }
+            if (clevo_set_max_increase_rate(ipc_handle, config.max_duty_increase_rate) == 0) {
+                printf("Response: OK\n");
             }
             break;
         }
         case CMD_GET_MAX_DUTY_INCREASE: {
-            char command[64];
-            snprintf(command, sizeof(command), "GET_MAX_DUTY_INCREASE");
-            if (send_command(sock, command) == 0) {
-                char response[BUFFER_SIZE];
-                if (receive_response(sock, response, sizeof(response)) == 0) {
-                    int rate;
-                    if (sscanf(response, "MAX_DUTY_INCREASE:%d", &rate) == 1) {
-                        printf("Current max duty increase rate: %d%%\n", rate);
-                    } else {
-                        printf("Response: %s\n", response);
-                    }
-                }
+            int rate;
+            if (clevo_get_max_increase_rate(ipc_handle, &rate) == 0) {
+                printf("Current max duty increase rate: %d%%\n", rate);
             }
             break;
         }
         case CMD_SET_MAX_DUTY_DECREASE: {
-            char command[64];
-            snprintf(command, sizeof(command), "SET_MAX_DUTY_DECREASE %d", config.max_duty_decrease_rate);
-            if (send_command(sock, command) == 0) {
-                char response[BUFFER_SIZE];
-                if (receive_response(sock, response, sizeof(response)) == 0) {
-                    printf("Response: %s\n", response);
-                }
+            if (clevo_set_max_decrease_rate(ipc_handle, config.max_duty_decrease_rate) == 0) {
+                printf("Response: OK\n");
             }
             break;
         }
         case CMD_GET_MAX_DUTY_DECREASE: {
-            char command[64];
-            snprintf(command, sizeof(command), "GET_MAX_DUTY_DECREASE");
-            if (send_command(sock, command) == 0) {
-                char response[BUFFER_SIZE];
-                if (receive_response(sock, response, sizeof(response)) == 0) {
-                    int rate;
-                    if (sscanf(response, "MAX_DUTY_DECREASE:%d", &rate) == 1) {
-                        printf("Current max duty decrease rate: %d%%\n", rate);
-                    } else {
-                        printf("Response: %s\n", response);
-                    }
-                }
+            int rate;
+            if (clevo_get_max_decrease_rate(ipc_handle, &rate) == 0) {
+                printf("Current max duty decrease rate: %d%%\n", rate);
             }
             break;
         }
         case CMD_RECOVER_TEMP: {
-            char command[64];
-            snprintf(command, sizeof(command), "RECOVER_TEMP");
-            if (send_command(sock, command) == 0) {
-                char response[BUFFER_SIZE];
-                if (receive_response(sock, response, sizeof(response)) == 0) {
-                    printf("Temperature recovery: %s\n", response);
-                }
+            if (clevo_recover_temp(ipc_handle) == 0) {
+                printf("Temperature recovery: OK\n");
             }
             break;
         }
@@ -394,19 +307,11 @@ int main(int argc, char* argv[]) {
                 
                 live_stats_init();
                 while (running) {
-                    int display_status = live_stats_display(sock);
+                    int display_status = live_stats_display(-1);
                     
                     // Check if we need to reconnect
                     if (display_status == -2) { // -2 indicates broken pipe
-                        // Connection lost, try to reconnect
-                        close(sock);
-                        sock = connect_to_daemon();
-                        if (sock < 0) {
-                            // Failed to reconnect, show error and exit
-                            live_stats_cleanup();
-                            printf("Failed to reconnect to daemon. Exiting...\n");
-                            return EXIT_FAILURE;
-                        }
+                        // DBus client: reconnect is handled per-call in clevo_ipc
                     }
                     
                     // Check if we should exit
@@ -426,56 +331,11 @@ int main(int argc, char* argv[]) {
             break;
     }
     
-    close(sock);
+    if (ipc_handle) {
+        clevo_ipc_free(ipc_handle);
+        ipc_handle = NULL;
+    }
     return EXIT_SUCCESS;
-}
-
-static int connect_to_daemon(void) {
-    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (sock < 0) {
-        perror("socket");
-        return -1;
-    }
-    
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
-    
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("connect");
-        close(sock);
-        return -1;
-    }
-    
-    return sock;
-}
-
-static int send_command(int sock, const char* command) {
-    ssize_t sent = send(sock, command, strlen(command), MSG_NOSIGNAL);
-    if (sent < 0) {
-        if (errno == EPIPE) {
-            // Connection was closed by daemon
-            return -2; // Special error code for broken pipe
-        }
-        perror("send");
-        return -1;
-    }
-    return 0;
-}
-
-static int receive_response(int sock, char* buffer, size_t size) {
-    ssize_t received = recv(sock, buffer, size - 1, 0);
-    if (received < 0) {
-        if (errno == EINTR) {
-            // Interrupted system call - this is normal during signal handling
-            return -1;
-        }
-        perror("recv");
-        return -1;
-    }
-    buffer[received] = '\0';
-    return 0;
 }
 
 static void print_status(const char* response) {
@@ -522,36 +382,20 @@ static void monitor_loop(void) {
     printf("Monitoring fan control (Press Ctrl+C to stop)...\n\n");
     
     while (running) {
-        // Create a new connection for each status request
-        int current_sock = connect_to_daemon();
-        if (current_sock < 0) {
-            printf("\nFailed to connect to daemon. Retrying in %.1f seconds...\n", config.monitor_interval);
-            usleep((int)(config.monitor_interval * 1000000));
-            continue;
-        }
-        
-        char command[64];
-        snprintf(command, sizeof(command), "STATUS");
-        
-        int send_result = send_command(current_sock, command);
-        if (send_result == 0) {
+        ClevoStatus st;
+        if (clevo_get_status(ipc_handle, &st) == 0) {
+            // Clear screen and print status
+            printf("\033[2J\033[H"); // Clear screen and move cursor to top
             char response[BUFFER_SIZE];
-            if (receive_response(current_sock, response, sizeof(response)) == 0) {
-                // Clear screen and print status
-                printf("\033[2J\033[H"); // Clear screen and move cursor to top
-                print_status(response);
-                
-                if (config.verbose) {
-                    time_t now = time(NULL);
-                    char time_str[64];
-                    strftime(time_str, sizeof(time_str), "%H:%M:%S", localtime(&now));
-                    printf("Last updated: %s\n", time_str);
-                }
+            snprintf(response, sizeof(response), "CPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d", st.cpu_temp, st.fan_duty, st.fan_rpm, st.auto_mode);
+            print_status(response);
+            if (config.verbose) {
+                time_t now = time(NULL);
+                char time_str[64];
+                strftime(time_str, sizeof(time_str), "%H:%M:%S", localtime(&now));
+                printf("Last updated: %s\n", time_str);
             }
         }
-        
-        // Close the connection after each request
-        close(current_sock);
         
         usleep((int)(config.monitor_interval * 1000000));
     }
@@ -864,25 +708,16 @@ static int live_stats_display(int sock) {
         return -1; // Indicate window too small
     }
     
-    // Get current status from daemon
-    char command[64];
-    snprintf(command, sizeof(command), "STATUS");
-    char response[BUFFER_SIZE];
-    
-    // Try to get status from daemon
+    // Get current status from daemon via DBus IPC
     int comm_success = 0;
     int cpu_temp = 0, fan_duty = 0, fan_rpm = 0, auto_mode = 0;
-    
-    int send_result = send_command(sock, command);
-    if (send_result == 0 && receive_response(sock, response, sizeof(response)) == 0) {
-        // Parse response
-        if (sscanf(response, "CPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d", 
-                    &cpu_temp, &fan_duty, &fan_rpm, &auto_mode) == 4) {
-            comm_success = 1;
-        }
-    } else if (send_result == -2) {
-        // Broken pipe - daemon connection lost
-        return -2; // Indicate broken pipe
+    ClevoStatus st;
+    if (clevo_get_status(ipc_handle, &st) == 0) {
+        cpu_temp = st.cpu_temp;
+        fan_duty = st.fan_duty;
+        fan_rpm = st.fan_rpm;
+        auto_mode = st.auto_mode;
+        comm_success = 1;
     }
     
     if (comm_success) {

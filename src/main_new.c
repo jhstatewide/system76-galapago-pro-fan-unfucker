@@ -28,7 +28,7 @@
 #include "fan_health.h"
 #include "daemon.h"
 #include "live_stats.h"
-#include "clevo-daemon-socket.h"
+// UDS removed
 #include "privilege_manager.h"
 #include "fan_constants.h"
 
@@ -54,8 +54,7 @@ static void signal_handler(int signum) {
         live_stats_cleanup(live_stats);
     }
     
-    // Stop socket server immediately
-    stop_socket_server();
+    // UDS removed
     
     // Force immediate exit to avoid waiting for sleep
     exit(EXIT_SUCCESS);
@@ -142,11 +141,7 @@ static int initialize_modules(void) {
         }
     }
     
-    // Initialize socket server
-    if (init_socket_server() != 0) {
-        logging_error("Failed to initialize socket server");
-        return -1;
-    }
+    // UDS removed
     
     logging_info("All modules initialized successfully");
     return 0;
@@ -156,8 +151,7 @@ static int initialize_modules(void) {
 static void cleanup_modules(void) {
     logging_info("Cleaning up modules...");
     
-    // Stop socket server
-    stop_socket_server();
+    // UDS removed
     
     // Clean up modules in reverse order
     if (live_stats) {

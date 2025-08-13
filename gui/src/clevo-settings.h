@@ -18,6 +18,9 @@
 #include <QSlider>
 #include <QProgressBar>
 #include <QTimer>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusReply>
 #include <QMessageBox>
 #include <QApplication>
 
@@ -60,10 +63,10 @@ private:
     void setupCommandsTab();
     void setupConnectionTab();
     
-    // Socket communication
-    bool sendCommand(const QString &command);
-    bool receiveResponse(QString &response);
+    // DBus helpers
     void appendOutput(const QString &text);
+    bool callMethodNoArg(const char *method, QString &outResponse);
+    bool callMethodIntArg(const char *method, int value, QString &outResponse);
     
     // UI Components
     QTabWidget *tabWidget;
@@ -102,13 +105,11 @@ private:
     QLabel *connectionStatusLabel;
     QTimer *statusTimer;
     
-    // Socket
-    int daemonSocket;
-    bool socketConnected;
-    
-    // Constants
-    static const char* SOCKET_PATH;
-    static const int BUFFER_SIZE = 1024;
+    // DBus state
+    bool dbusConnected;
+    static constexpr const char* DBUS_SERVICE_NAME = "org.freedesktop.ClevoDaemon";
+    static constexpr const char* DBUS_OBJECT_PATH = "/org/freedesktop/ClevoDaemon";
+    static constexpr const char* DBUS_INTERFACE = "org.freedesktop.ClevoDaemon";
 };
 
 #endif // CLEVO_SETTINGS_H 

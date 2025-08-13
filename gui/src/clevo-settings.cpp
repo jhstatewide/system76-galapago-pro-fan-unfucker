@@ -3,13 +3,15 @@
 #include <QMessageBox>
 #include <QDebug>
 #include <QTime>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
-#include <errno.h>
-#include <cstring>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusReply>
+#include <QDBusError>
 
-const char* ClevoSettingsDialog::SOCKET_PATH = "/run/clevo-daemon.sock";
+// DBus constants (use file-scope to avoid access issues)
+static const char* CLEVO_DBUS_SERVICE_NAME = "org.freedesktop.ClevoDaemon";
+static const char* CLEVO_DBUS_OBJECT_PATH = "/org/freedesktop/ClevoDaemon";
+static const char* CLEVO_DBUS_INTERFACE = "org.freedesktop.ClevoDaemon";
 
 ClevoSettingsDialog::ClevoSettingsDialog(QWidget *parent)
     : QDialog(parent)
@@ -17,8 +19,7 @@ ClevoSettingsDialog::ClevoSettingsDialog(QWidget *parent)
     , settingsTab(nullptr)
     , commandsTab(nullptr)
     , connectionTab(nullptr)
-    , daemonSocket(-1)
-    , socketConnected(false)
+    , dbusConnected(false)
     , statusTimer(new QTimer(this))
 {
     setWindowTitle("Clevo Fan Control Settings");
@@ -40,9 +41,7 @@ ClevoSettingsDialog::ClevoSettingsDialog(QWidget *parent)
 
 ClevoSettingsDialog::~ClevoSettingsDialog()
 {
-    if (daemonSocket >= 0) {
-        ::close(daemonSocket);
-    }
+    // No explicit teardown for DBus
 }
 
 void ClevoSettingsDialog::setupUI()
@@ -265,46 +264,33 @@ void ClevoSettingsDialog::setupConnectionTab()
 
 bool ClevoSettingsDialog::connectToDaemon()
 {
-    if (daemonSocket >= 0) {
-        ::close(daemonSocket);
-    }
-    
-    daemonSocket = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (daemonSocket < 0) {
-        appendOutput("Failed to create socket: " + QString(strerror(errno)));
+    QDBusConnection connection = QDBusConnection::systemBus();
+    if (!connection.isConnected()) {
+        appendOutput("Failed to connect to system bus");
+        dbusConnected = false;
         return false;
     }
-    
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
-    
-    if (::connect(daemonSocket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        appendOutput("Failed to connect to daemon: " + QString(strerror(errno)));
-        ::close(daemonSocket);
-        daemonSocket = -1;
-        return false;
+    QDBusMessage msg = QDBusMessage::createMethodCall(CLEVO_DBUS_SERVICE_NAME, CLEVO_DBUS_OBJECT_PATH, CLEVO_DBUS_INTERFACE, "GetStatus");
+    QDBusReply<QString> reply = connection.call(msg, QDBus::BlockWithGui, 1000);
+    if (reply.isValid()) {
+        dbusConnected = true;
+        appendOutput("Connected to clevo-daemon (DBus)");
+        return true;
     }
-    
-    socketConnected = true;
-    appendOutput("Connected to clevo-daemon");
-    return true;
+    appendOutput("Failed to connect to daemon: " + reply.error().message());
+    dbusConnected = false;
+    return false;
 }
 
 void ClevoSettingsDialog::disconnectFromDaemon()
 {
-    if (daemonSocket >= 0) {
-        ::close(daemonSocket);
-        daemonSocket = -1;
-    }
-    socketConnected = false;
-    appendOutput("Disconnected from daemon");
+    dbusConnected = false;
+    appendOutput("Disconnected from daemon (DBus)");
 }
 
 void ClevoSettingsDialog::updateConnectionStatus()
 {
-    if (socketConnected) {
+    if (dbusConnected) {
         connectionStatusLabel->setText("Connected");
         connectionStatusLabel->setStyleSheet("color: green; font-weight: bold;");
         connectButton->setEnabled(false);
@@ -317,83 +303,29 @@ void ClevoSettingsDialog::updateConnectionStatus()
     }
 }
 
-bool ClevoSettingsDialog::sendCommand(const QString &command)
+static QString callGetStatus()
 {
-    // Ensure connection (server expects single-command connections)
-    if (!socketConnected || daemonSocket < 0) {
-        if (!connectToDaemon()) {
-            return false;
-        }
-    }
-    
-    QByteArray data = command.toUtf8();
-    ssize_t sent = send(daemonSocket, data.constData(), data.size(), MSG_NOSIGNAL);
-    
-    if (sent < 0) {
-        if (errno == EPIPE) {
-            // Server likely closed previous connection; reconnect and retry once
-            socketConnected = false;
-            ::close(daemonSocket);
-            daemonSocket = -1;
-            if (!connectToDaemon()) {
-                return false;
-            }
-            sent = send(daemonSocket, data.constData(), data.size(), MSG_NOSIGNAL);
-            if (sent < 0) {
-                appendOutput("Failed to send command after reconnect: " + QString(strerror(errno)));
-                return false;
-            }
-        } else {
-            appendOutput("Failed to send command: " + QString(strerror(errno)));
-            return false;
-        }
-    }
-    
-    return true;
+    QDBusConnection connection = QDBusConnection::systemBus();
+    QDBusMessage msg = QDBusMessage::createMethodCall(CLEVO_DBUS_SERVICE_NAME,
+                                                      CLEVO_DBUS_OBJECT_PATH,
+                                                      CLEVO_DBUS_INTERFACE,
+                                                      "GetStatus");
+    QDBusReply<QString> reply = connection.call(msg, QDBus::BlockWithGui, 2000);
+    if (reply.isValid()) return reply.value();
+    return QString("DBus error: ") + reply.error().message();
 }
 
-bool ClevoSettingsDialog::receiveResponse(QString &response)
+static bool callInt(const char *method, int value, QString &out)
 {
-    if (daemonSocket < 0) {
-        return false;
-    }
-    
-    // Set up select() for timeout
-    fd_set readfds;
-    struct timeval timeout;
-    
-    FD_ZERO(&readfds);
-    FD_SET(daemonSocket, &readfds);
-    timeout.tv_sec = 2;  // 2 second timeout
-    timeout.tv_usec = 0;
-    
-    int select_result = select(daemonSocket + 1, &readfds, NULL, NULL, &timeout);
-    
-    if (select_result == 0) {
-        appendOutput("Timeout waiting for response");
-        return false;
-    } else if (select_result < 0) {
-        appendOutput("Select error: " + QString(strerror(errno)));
-        return false;
-    }
-    
-    // Now safe to recv() without blocking
-    char buffer[BUFFER_SIZE];
-    ssize_t received = recv(daemonSocket, buffer, sizeof(buffer) - 1, 0);
-    
-    if (received < 0) {
-        appendOutput("Failed to receive response: " + QString(strerror(errno)));
-        return false;
-    }
-    
-    buffer[received] = '\0';
-    response = QString::fromUtf8(buffer);
-    // Server uses one-request-per-connection; close locally to avoid EPIPE on next command
-    if (daemonSocket >= 0) {
-        ::close(daemonSocket);
-        daemonSocket = -1;
-        socketConnected = false;
-    }
+    QDBusConnection connection = QDBusConnection::systemBus();
+    QDBusMessage msg = QDBusMessage::createMethodCall(CLEVO_DBUS_SERVICE_NAME,
+                                                      CLEVO_DBUS_OBJECT_PATH,
+                                                      CLEVO_DBUS_INTERFACE,
+                                                      method);
+    msg << value;
+    QDBusReply<QString> reply = connection.call(msg, QDBus::BlockWithGui, 2000);
+    if (!reply.isValid()) { out = QString("DBus error: ") + reply.error().message(); return false; }
+    out = reply.value();
     return true;
 }
 
@@ -439,96 +371,68 @@ void ClevoSettingsDialog::autoStartToggled(bool checked)
 void ClevoSettingsDialog::sendFanCommand()
 {
     int duty = fanDutySpinBox->value();
-    QString command = QString("SET_FAN %1").arg(duty);
-    
-    if (sendCommand(command)) {
-        QString response;
-        if (receiveResponse(response)) {
-            appendOutput(QString("Set fan duty to %1%: %2").arg(duty).arg(response));
-        }
-    }
+    QString response;
+    if (callInt("SetFanDuty", duty, response))
+        appendOutput(QString("Set fan duty to %1%: %2").arg(duty).arg(response));
+    else
+        appendOutput(response);
 }
 
 void ClevoSettingsDialog::sendAutoCommand()
 {
-    if (sendCommand("SET_AUTO")) {
-        QString response;
-        if (receiveResponse(response)) {
-            appendOutput("Enabled auto mode: " + response);
-        }
-    }
+    QDBusConnection connection = QDBusConnection::systemBus();
+    QDBusMessage msg = QDBusMessage::createMethodCall(DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE, "SetAutoMode");
+    msg << true;
+    QDBusReply<QString> reply = connection.call(msg, QDBus::BlockWithGui, 2000);
+    if (reply.isValid()) appendOutput("Enabled auto mode: " + reply.value());
+    else appendOutput("Failed to enable auto mode: " + reply.error().message());
 }
 
 void ClevoSettingsDialog::sendTargetTempCommand()
 {
     int temp = targetTempSpinBox->value();
-    QString command = QString("SET_TARGET_TEMP %1").arg(temp);
-    
-    if (sendCommand(command)) {
-        QString response;
-        if (receiveResponse(response)) {
-            appendOutput(QString("Set target temperature to %1°C: %2").arg(temp).arg(response));
-        }
-    }
+    QString response;
+    if (callInt("SetTargetTemp", temp, response)) appendOutput(QString("Set target temperature to %1°C: %2").arg(temp).arg(response));
+    else appendOutput(response);
 }
 
 void ClevoSettingsDialog::sendMaxDutyChangeCommand()
 {
     int rate = maxDutyChangeSpinBox->value();
-    QString command = QString("SET_MAX_DUTY_CHANGE %1").arg(rate);
-    
-    if (sendCommand(command)) {
-        QString response;
-        if (receiveResponse(response)) {
-            appendOutput(QString("Set max duty change to %1%: %2").arg(rate).arg(response));
-        }
-    }
+    QString response;
+    if (callInt("SetMaxDutyChange", rate, response)) appendOutput(QString("Set max duty change to %1%: %2").arg(rate).arg(response));
+    else appendOutput(response);
 }
 
 void ClevoSettingsDialog::sendMaxIncreaseCommand()
 {
     int rate = maxIncreaseSpinBox->value();
-    QString command = QString("SET_MAX_DUTY_INCREASE %1").arg(rate);
-    
-    if (sendCommand(command)) {
-        QString response;
-        if (receiveResponse(response)) {
-            appendOutput(QString("Set max duty increase to %1%: %2").arg(rate).arg(response));
-        }
-    }
+    QString response;
+    if (callInt("SetMaxDutyIncrease", rate, response)) appendOutput(QString("Set max duty increase to %1%: %2").arg(rate).arg(response));
+    else appendOutput(response);
 }
 
 void ClevoSettingsDialog::sendMaxDecreaseCommand()
 {
     int rate = maxDecreaseSpinBox->value();
-    QString command = QString("SET_MAX_DUTY_DECREASE %1").arg(rate);
-    
-    if (sendCommand(command)) {
-        QString response;
-        if (receiveResponse(response)) {
-            appendOutput(QString("Set max duty decrease to %1%: %2").arg(rate).arg(response));
-        }
-    }
+    QString response;
+    if (callInt("SetMaxDutyDecrease", rate, response)) appendOutput(QString("Set max duty decrease to %1%: %2").arg(rate).arg(response));
+    else appendOutput(response);
 }
 
 void ClevoSettingsDialog::sendRecoverTempCommand()
 {
-    if (sendCommand("RECOVER_TEMP")) {
-        QString response;
-        if (receiveResponse(response)) {
-            appendOutput("Temperature recovery: " + response);
-        }
-    }
+    QDBusConnection connection = QDBusConnection::systemBus();
+    QDBusMessage msg = QDBusMessage::createMethodCall(DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE, "RecoverTemp");
+    QDBusReply<QString> reply = connection.call(msg, QDBus::BlockWithGui, 2000);
+    if (reply.isValid()) appendOutput("Temperature recovery: " + reply.value());
+    else appendOutput("Failed to recover temperature: " + reply.error().message());
 }
 
 void ClevoSettingsDialog::refreshStatus()
 {
-    if (sendCommand("STATUS")) {
-        QString response;
-        if (receiveResponse(response)) {
-            appendOutput("Current status: " + response);
-        }
-    }
+    QString response = callGetStatus();
+    appendOutput("Current status: " + response);
 }
 
 void ClevoSettingsDialog::clearOutput()

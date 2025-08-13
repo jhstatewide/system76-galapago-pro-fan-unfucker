@@ -86,7 +86,7 @@ The application stores settings in `~/.config/clevo-gui/clevo-gui.conf`:
 - **GuiDisplay**: Drawing utilities
 
 ### Communication
-- Unix domain socket connection to `/run/clevo-daemon.sock`
+- Uses D-Bus interface `org.freedesktop.ClevoDaemon` on the system bus
 - Non-blocking I/O with Qt event loop
 - Automatic reconnection on connection loss
 - Error handling and status reporting

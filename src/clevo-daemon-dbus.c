@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
 #include <syslog.h>
@@ -584,6 +585,130 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
         dbus_message_unref(reply);
         return DBUS_HANDLER_RESULT_HANDLED;
         
+    } else if (strcmp(method_name, "SetMaxDutyIncrease") == 0) {
+        DBusError error; dbus_error_init(&error);
+        int rate;
+        if (dbus_message_get_args(msg, &error, DBUS_TYPE_INT32, &rate, DBUS_TYPE_INVALID)) {
+            if (rate >= 1 && rate <= 100) {
+                max_duty_increase_rate = rate;
+                DBusMessage* reply = dbus_message_new_method_return(msg);
+                if (!reply) { return DBUS_HANDLER_RESULT_NEED_MEMORY; }
+                DBusMessageIter iter; dbus_message_iter_init_append(reply, &iter);
+                const char* response = "OK: Max duty increase rate updated";
+                dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &response);
+                if (!dbus_connection_send(dbus_conn, reply, NULL)) { dbus_message_unref(reply); return DBUS_HANDLER_RESULT_NEED_MEMORY; }
+                dbus_message_unref(reply);
+                return DBUS_HANDLER_RESULT_HANDLED;
+            } else {
+                DBusMessage* reply = dbus_message_new_error(msg,
+                    "org.freedesktop.ClevoDaemon.Error.InvalidValue",
+                    "Rate must be between 1 and 100");
+                if (reply) { dbus_connection_send(dbus_conn, reply, NULL); dbus_message_unref(reply); }
+                return DBUS_HANDLER_RESULT_HANDLED;
+            }
+        } else {
+            DBusMessage* reply = dbus_message_new_error(msg,
+                "org.freedesktop.ClevoDaemon.Error.InvalidArgs",
+                "Invalid arguments for SetMaxDutyIncrease");
+            if (reply) { dbus_connection_send(dbus_conn, reply, NULL); dbus_message_unref(reply); }
+            return DBUS_HANDLER_RESULT_HANDLED;
+        }
+    } else if (strcmp(method_name, "GetMaxDutyIncrease") == 0) {
+        char response[64];
+        snprintf(response, sizeof(response), "MAX_DUTY_INCREASE:%d", max_duty_increase_rate);
+        DBusMessage* reply = dbus_message_new_method_return(msg);
+        if (!reply) { return DBUS_HANDLER_RESULT_NEED_MEMORY; }
+        DBusMessageIter iter; dbus_message_iter_init_append(reply, &iter);
+        dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &response);
+        if (!dbus_connection_send(dbus_conn, reply, NULL)) { dbus_message_unref(reply); return DBUS_HANDLER_RESULT_NEED_MEMORY; }
+        dbus_message_unref(reply);
+        return DBUS_HANDLER_RESULT_HANDLED;
+    } else if (strcmp(method_name, "SetMaxDutyDecrease") == 0) {
+        DBusError error; dbus_error_init(&error);
+        int rate;
+        if (dbus_message_get_args(msg, &error, DBUS_TYPE_INT32, &rate, DBUS_TYPE_INVALID)) {
+            if (rate >= 1 && rate <= 100) {
+                max_duty_decrease_rate = rate;
+                DBusMessage* reply = dbus_message_new_method_return(msg);
+                if (!reply) { return DBUS_HANDLER_RESULT_NEED_MEMORY; }
+                DBusMessageIter iter; dbus_message_iter_init_append(reply, &iter);
+                const char* response = "OK: Max duty decrease rate updated";
+                dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &response);
+                if (!dbus_connection_send(dbus_conn, reply, NULL)) { dbus_message_unref(reply); return DBUS_HANDLER_RESULT_NEED_MEMORY; }
+                dbus_message_unref(reply);
+                return DBUS_HANDLER_RESULT_HANDLED;
+            } else {
+                DBusMessage* reply = dbus_message_new_error(msg,
+                    "org.freedesktop.ClevoDaemon.Error.InvalidValue",
+                    "Rate must be between 1 and 100");
+                if (reply) { dbus_connection_send(dbus_conn, reply, NULL); dbus_message_unref(reply); }
+                return DBUS_HANDLER_RESULT_HANDLED;
+            }
+        } else {
+            DBusMessage* reply = dbus_message_new_error(msg,
+                "org.freedesktop.ClevoDaemon.Error.InvalidArgs",
+                "Invalid arguments for SetMaxDutyDecrease");
+            if (reply) { dbus_connection_send(dbus_conn, reply, NULL); dbus_message_unref(reply); }
+            return DBUS_HANDLER_RESULT_HANDLED;
+        }
+    } else if (strcmp(method_name, "GetMaxDutyDecrease") == 0) {
+        char response[64];
+        snprintf(response, sizeof(response), "MAX_DUTY_DECREASE:%d", max_duty_decrease_rate);
+        DBusMessage* reply = dbus_message_new_method_return(msg);
+        if (!reply) { return DBUS_HANDLER_RESULT_NEED_MEMORY; }
+        DBusMessageIter iter; dbus_message_iter_init_append(reply, &iter);
+        dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &response);
+        if (!dbus_connection_send(dbus_conn, reply, NULL)) { dbus_message_unref(reply); return DBUS_HANDLER_RESULT_NEED_MEMORY; }
+        dbus_message_unref(reply);
+        return DBUS_HANDLER_RESULT_HANDLED;
+    } else if (strcmp(method_name, "SetTargetTemp") == 0) {
+        DBusError error; dbus_error_init(&error);
+        int temp;
+        if (dbus_message_get_args(msg, &error, DBUS_TYPE_INT32, &temp, DBUS_TYPE_INVALID)) {
+            if (temp >= 40 && temp <= 100) {
+                // Forward to EC config function if available
+                extern void ec_set_target_temperature(int temp);
+                ec_set_target_temperature(temp);
+                DBusMessage* reply = dbus_message_new_method_return(msg);
+                if (!reply) { return DBUS_HANDLER_RESULT_NEED_MEMORY; }
+                DBusMessageIter iter; dbus_message_iter_init_append(reply, &iter);
+                const char* response = "OK: Target temperature updated";
+                dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &response);
+                if (!dbus_connection_send(dbus_conn, reply, NULL)) { dbus_message_unref(reply); return DBUS_HANDLER_RESULT_NEED_MEMORY; }
+                dbus_message_unref(reply);
+                return DBUS_HANDLER_RESULT_HANDLED;
+            } else {
+                DBusMessage* reply = dbus_message_new_error(msg,
+                    "org.freedesktop.ClevoDaemon.Error.InvalidValue",
+                    "Target temperature must be 40-100");
+                if (reply) { dbus_connection_send(dbus_conn, reply, NULL); dbus_message_unref(reply); }
+                return DBUS_HANDLER_RESULT_HANDLED;
+            }
+        } else {
+            DBusMessage* reply = dbus_message_new_error(msg,
+                "org.freedesktop.ClevoDaemon.Error.InvalidArgs",
+                "Invalid arguments for SetTargetTemp");
+            if (reply) { dbus_connection_send(dbus_conn, reply, NULL); dbus_message_unref(reply); }
+            return DBUS_HANDLER_RESULT_HANDLED;
+        }
+    } else if (strcmp(method_name, "RecoverTemp") == 0) {
+        // Best-effort recovery mirroring UDS path
+        int cpu_temp = 0;
+        int io_fd = open("/sys/kernel/debug/ec/ec0/io", O_RDONLY, 0);
+        if (io_fd >= 0) {
+            unsigned char buf[0x100];
+            ssize_t len = read(io_fd, buf, 0x100);
+            close(io_fd);
+            if (len == 0x100) { cpu_temp = buf[0x07]; }
+        }
+        const char *resp = cpu_temp ? "OK: Temperature recovery successful" : "OK: Temperature recovery attempted";
+        DBusMessage* reply = dbus_message_new_method_return(msg);
+        if (!reply) { return DBUS_HANDLER_RESULT_NEED_MEMORY; }
+        DBusMessageIter iter; dbus_message_iter_init_append(reply, &iter);
+        dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &resp);
+        if (!dbus_connection_send(dbus_conn, reply, NULL)) { dbus_message_unref(reply); return DBUS_HANDLER_RESULT_NEED_MEMORY; }
+        dbus_message_unref(reply);
+        return DBUS_HANDLER_RESULT_HANDLED;
     } else {
         // Create error reply for unknown method
         DBusMessage* reply = dbus_message_new_error(msg, 
