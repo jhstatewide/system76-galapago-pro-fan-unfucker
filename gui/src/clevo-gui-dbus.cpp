@@ -47,7 +47,7 @@ ClevoMonitor::ClevoMonitor(QWidget *parent)
     bus.connect(DBUS_SERVICE_NAME,
                 DBUS_OBJECT_PATH,
                 DBUS_INTERFACE,
-                "StatusChanged2",
+                "StatusChanged",
                 this,
                 SLOT(onStatusChangedMap(QVariantMap)));
 }
@@ -184,7 +184,7 @@ void ClevoMonitor::updateStatus()
     
     QDBusConnection connection = QDBusConnection::systemBus();
     // Try typed method first (a{sv})
-    QDBusMessage msg2 = QDBusMessage::createMethodCall(DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE, "GetStatus2");
+    QDBusMessage msg2 = QDBusMessage::createMethodCall(DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE, "GetStatus");
     QDBusReply<QVariantMap> reply2 = connection.call(msg2, QDBus::BlockWithGui, 1000);
     if (reply2.isValid()) {
         const auto m = reply2.value();

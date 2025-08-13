@@ -63,9 +63,9 @@ void clevo_ipc_free(ClevoIpc *handle) {
 
 int clevo_get_status(ClevoIpc *handle, ClevoStatus *out_status) {
     if (!handle || !out_status) return -1;
-    // Try typed method first: GetStatus2 -> a{sv}
+    // Try typed method first: GetStatus -> a{sv}
     {
-        DBusMessage *msg2 = dbus_message_new_method_call(DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE, "GetStatus2");
+        DBusMessage *msg2 = dbus_message_new_method_call(DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE, "GetStatus");
         if (msg2) {
             DBusMessage *reply2 = dbus_connection_send_with_reply_and_block(handle->conn, msg2, 500, NULL);
             dbus_message_unref(msg2);

@@ -111,7 +111,6 @@ static int check_dbus_system_bus(void) {
 // Function declarations
 static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* msg, void* user_data);
 static int send_signal_map(const char* signal_name, int cpu_temp, int fan_duty, int fan_rpm, int auto_mode);
-
 static void dbus_signal_handler(int sig);
 
 int init_dbus_interface(void) {
@@ -145,7 +144,7 @@ int init_dbus_interface(void) {
         fprintf(stderr, "DBUS_DEBUG: UID: %d, EUID: %d\n", getuid(), geteuid());
         fprintf(stderr, "DBUS_DEBUG: GID: %d, EGID: %d\n", getgid(), getegid());
         
-        // Check if we're running as root
+        // Check if we are running as root
         if (geteuid() != 0) {
             fprintf(stderr, "DBUS_DEBUG: WARNING - Not running as root, this may cause DBus connection issues\n");
         }
@@ -209,6 +208,7 @@ int init_dbus_interface(void) {
     return 0;
 }
 
+
 void stop_dbus_interface(void) {
     fprintf(stderr, "DBUS_DEBUG: Stopping DBus interface...\n");
     
@@ -242,7 +242,7 @@ int broadcast_status_update(int cpu_temp, int fan_duty, int fan_rpm, int auto_mo
         return 0;
     }
     // Send typed signal only
-    send_signal_map("StatusChanged2", cpu_temp, fan_duty, fan_rpm, auto_mode);
+    send_signal_map("StatusChanged", cpu_temp, fan_duty, fan_rpm, auto_mode);
     return 0;
 }
 
@@ -318,9 +318,9 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
     }
     
     // Handle different method calls
-    if (strcmp(method_name, "GetStatus2") == 0) {
+    if (strcmp(method_name, "GetStatus") == 0) {
         if (dbus_debug_mode) {
-            fprintf(stderr, "DBUS_DEBUG: Handling GetStatus2 method call (a{sv})\n");
+            fprintf(stderr, "DBUS_DEBUG: Handling GetStatus method call (a{sv})\n");
         }
         if (!share_info) {
             fprintf(stderr, "ERROR: share_info is NULL!\n");
@@ -742,37 +742,9 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
     return DBUS_HANDLER_RESULT_HANDLED;
 }
 
-static int send_signal(const char* signal_name, int cpu_temp, int fan_duty, int fan_rpm, int auto_mode) {
-    if (!dbus_conn) {
-        return -1;
-    }
-    
-    DBusMessage* msg = dbus_message_new_signal(DBUS_OBJECT_PATH, DBUS_INTERFACE, signal_name);
-    if (!msg) {
-        dbus_log(LOG_ERR, "Failed to create DBus signal message");
-        return -1;
-    }
-    
-    DBusMessageIter iter;
-    dbus_message_iter_init_append(msg, &iter);
-    
-    // Add signal parameters
-    dbus_message_iter_append_basic(&iter, DBUS_TYPE_INT32, &cpu_temp);
-    dbus_message_iter_append_basic(&iter, DBUS_TYPE_INT32, &fan_duty);
-    dbus_message_iter_append_basic(&iter, DBUS_TYPE_INT32, &fan_rpm);
-    dbus_message_iter_append_basic(&iter, DBUS_TYPE_BOOLEAN, &auto_mode);
-    
-    // Send the signal
-    dbus_bool_t sent = dbus_connection_send(dbus_conn, msg, NULL);
-    dbus_message_unref(msg);
-    
-    if (!sent) {
-        dbus_log(LOG_ERR, "Failed to send DBus signal");
-        return -1;
-    }
-    
-    return 0;
-}
+
+
+
 
 static int send_signal_map(const char* signal_name, int cpu_temp, int fan_duty, int fan_rpm, int auto_mode) {
     if (!dbus_conn) return -1;
@@ -805,7 +777,6 @@ static int send_signal_map(const char* signal_name, int cpu_temp, int fan_duty, 
     dbus_bool_t sent = dbus_connection_send(dbus_conn, msg, NULL); dbus_message_unref(msg);
     return sent ? 0 : -1;
 }
-
 
 
 static void dbus_signal_handler(int sig) {
