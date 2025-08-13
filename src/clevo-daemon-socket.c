@@ -200,7 +200,10 @@ static void* socket_server_thread(void* arg) {
                 buffer[received] = '\0';
                 
                 // Handle all clients the same way - single command, single response
-                socket_log(LOG_INFO, "Client connected - handling command: %s", buffer);
+                // Reduce log noise: do not log STATUS polls at all
+                if (strncmp(buffer, "STATUS", 6) != 0) {
+                    socket_log(LOG_INFO, "Client connected - handling command: %s", buffer);
+                }
                 handle_client_command(client_sock, buffer);
                 close(client_sock);
             } else {
