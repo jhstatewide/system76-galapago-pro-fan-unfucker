@@ -63,6 +63,45 @@ void clevo_ipc_free(ClevoIpc *handle) {
 
 int clevo_get_status(ClevoIpc *handle, ClevoStatus *out_status) {
     if (!handle || !out_status) return -1;
+    // Try typed method first: GetStatus2 -> a{sv}
+    {
+        DBusMessage *msg2 = dbus_message_new_method_call(DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE, "GetStatus2");
+        if (msg2) {
+            DBusMessage *reply2 = dbus_connection_send_with_reply_and_block(handle->conn, msg2, 500, NULL);
+            dbus_message_unref(msg2);
+            if (reply2) {
+                DBusMessageIter iter; dbus_message_iter_init(reply2, &iter);
+                if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_ARRAY) {
+                    DBusMessageIter dict; dbus_message_iter_recurse(&iter, &dict);
+                    int cpu=0, duty=0, rpm=0; dbus_bool_t auto_b=FALSE;
+                    while (dbus_message_iter_get_arg_type(&dict) == DBUS_TYPE_DICT_ENTRY) {
+                        DBusMessageIter entry; dbus_message_iter_recurse(&dict, &entry);
+                        const char *key = NULL; dbus_message_iter_get_basic(&entry, &key);
+                        dbus_message_iter_next(&entry);
+                        DBusMessageIter var; dbus_message_iter_recurse(&entry, &var);
+                        int at = dbus_message_iter_get_arg_type(&var);
+                        if (key && at == DBUS_TYPE_INT32) {
+                            int val; dbus_message_iter_get_basic(&var, &val);
+                            if (strcmp(key, "cpu_temp") == 0) cpu = val;
+                            else if (strcmp(key, "fan_duty") == 0) duty = val;
+                            else if (strcmp(key, "fan_rpm") == 0) rpm = val;
+                        } else if (key && at == DBUS_TYPE_BOOLEAN) {
+                            dbus_message_iter_get_basic(&var, &auto_b);
+                        }
+                        dbus_message_iter_next(&dict);
+                    }
+                    out_status->cpu_temp = cpu;
+                    out_status->fan_duty = duty;
+                    out_status->fan_rpm = rpm;
+                    out_status->auto_mode = auto_b ? 1 : 0;
+                    dbus_message_unref(reply2);
+                    return 0;
+                }
+                dbus_message_unref(reply2);
+            }
+        }
+    }
+    // Fallback to legacy string method
     DBusMessage *msg = dbus_message_new_method_call(DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE, "GetStatus");
     if (!msg) return -1;
     DBusMessage *reply = dbus_connection_send_with_reply_and_block(handle->conn, msg, -1, NULL);

@@ -111,6 +111,7 @@ static int check_dbus_system_bus(void) {
 // Function declarations
 static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* msg, void* user_data);
 static int send_signal(const char* signal_name, int cpu_temp, int fan_duty, int fan_rpm, int auto_mode);
+static int send_signal_map(const char* signal_name, int cpu_temp, int fan_duty, int fan_rpm, int auto_mode);
 
 static void dbus_signal_handler(int sig);
 
@@ -241,8 +242,10 @@ int broadcast_status_update(int cpu_temp, int fan_duty, int fan_rpm, int auto_mo
         // No clients listening, don't waste CPU on signal creation
         return 0;
     }
-    
-    return send_signal("StatusChanged", cpu_temp, fan_duty, fan_rpm, auto_mode);
+    // Send both legacy and typed signals for compatibility
+    send_signal("StatusChanged", cpu_temp, fan_duty, fan_rpm, auto_mode);
+    send_signal_map("StatusChanged2", cpu_temp, fan_duty, fan_rpm, auto_mode);
+    return 0;
 }
 
 int process_dbus_messages(void) {
@@ -359,6 +362,68 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
             return DBUS_HANDLER_RESULT_NEED_MEMORY;
         }
         
+        dbus_message_unref(reply);
+        return DBUS_HANDLER_RESULT_HANDLED;
+        
+    } else if (strcmp(method_name, "GetStatus2") == 0) {
+        if (dbus_debug_mode) {
+            fprintf(stderr, "DBUS_DEBUG: Handling GetStatus2 method call (a{sv})\n");
+        }
+        if (!share_info) {
+            fprintf(stderr, "ERROR: share_info is NULL!\n");
+            return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+        }
+        DBusMessage* reply = dbus_message_new_method_return(msg);
+        if (!reply) {
+            fprintf(stderr, "ERROR: Failed to create reply message\n");
+            return DBUS_HANDLER_RESULT_NEED_MEMORY;
+        }
+        DBusMessageIter iter;
+        dbus_message_iter_init_append(reply, &iter);
+        
+        // Begin a{sv}
+        DBusMessageIter dict;
+        dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &dict);
+        
+        // Helper macro to append one { key: variant(value) }
+        #define APPEND_SV_INT(key_literal, value_int) \
+            do { \
+                DBusMessageIter entry, variant; \
+                const char* k = key_literal; \
+                dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry); \
+                dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k); \
+                dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, DBUS_TYPE_INT32_AS_STRING, &variant); \
+                int v = (value_int); \
+                dbus_message_iter_append_basic(&variant, DBUS_TYPE_INT32, &v); \
+                dbus_message_iter_close_container(&entry, &variant); \
+                dbus_message_iter_close_container(&dict, &entry); \
+            } while (0)
+        
+        #define APPEND_SV_BOOL(key_literal, value_bool) \
+            do { \
+                DBusMessageIter entry, variant; \
+                const char* k = key_literal; \
+                dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry); \
+                dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k); \
+                dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, DBUS_TYPE_BOOLEAN_AS_STRING, &variant); \
+                dbus_bool_t v = (value_bool) ? TRUE : FALSE; \
+                dbus_message_iter_append_basic(&variant, DBUS_TYPE_BOOLEAN, &v); \
+                dbus_message_iter_close_container(&entry, &variant); \
+                dbus_message_iter_close_container(&dict, &entry); \
+            } while (0)
+        
+        APPEND_SV_INT("cpu_temp", share_info->cpu_temp);
+        APPEND_SV_INT("fan_duty", share_info->fan_duty);
+        APPEND_SV_INT("fan_rpm",  share_info->fan_rpms);
+        APPEND_SV_BOOL("auto_mode", share_info->auto_duty);
+        
+        // End a{sv}
+        dbus_message_iter_close_container(&iter, &dict);
+        
+        if (!dbus_connection_send(dbus_conn, reply, NULL)) {
+            dbus_message_unref(reply);
+            return DBUS_HANDLER_RESULT_NEED_MEMORY;
+        }
         dbus_message_unref(reply);
         return DBUS_HANDLER_RESULT_HANDLED;
         
@@ -754,6 +819,38 @@ static int send_signal(const char* signal_name, int cpu_temp, int fan_duty, int 
     }
     
     return 0;
+}
+
+static int send_signal_map(const char* signal_name, int cpu_temp, int fan_duty, int fan_rpm, int auto_mode) {
+    if (!dbus_conn) return -1;
+    DBusMessage* msg = dbus_message_new_signal(DBUS_OBJECT_PATH, DBUS_INTERFACE, signal_name);
+    if (!msg) { dbus_log(LOG_ERR, "Failed to create DBus signal message"); return -1; }
+    DBusMessageIter iter, dict; dbus_message_iter_init_append(msg, &iter);
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &dict);
+    // Helpers inline (duplicate of method for brevity)
+    #define APPEND_SV_INT_SIG(key_literal, value_int) do { \
+        DBusMessageIter entry, variant; const char* k = key_literal; \
+        dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry); \
+        dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k); \
+        dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, DBUS_TYPE_INT32_AS_STRING, &variant); \
+        int v = (value_int); dbus_message_iter_append_basic(&variant, DBUS_TYPE_INT32, &v); \
+        dbus_message_iter_close_container(&entry, &variant); \
+        dbus_message_iter_close_container(&dict, &entry); } while (0)
+    #define APPEND_SV_BOOL_SIG(key_literal, value_bool) do { \
+        DBusMessageIter entry, variant; const char* k = key_literal; \
+        dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry); \
+        dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &k); \
+        dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, DBUS_TYPE_BOOLEAN_AS_STRING, &variant); \
+        dbus_bool_t v = (value_bool) ? TRUE : FALSE; dbus_message_iter_append_basic(&variant, DBUS_TYPE_BOOLEAN, &v); \
+        dbus_message_iter_close_container(&entry, &variant); \
+        dbus_message_iter_close_container(&dict, &entry); } while (0)
+    APPEND_SV_INT_SIG("cpu_temp", cpu_temp);
+    APPEND_SV_INT_SIG("fan_duty", fan_duty);
+    APPEND_SV_INT_SIG("fan_rpm", fan_rpm);
+    APPEND_SV_BOOL_SIG("auto_mode", auto_mode);
+    dbus_message_iter_close_container(&iter, &dict);
+    dbus_bool_t sent = dbus_connection_send(dbus_conn, msg, NULL); dbus_message_unref(msg);
+    return sent ? 0 : -1;
 }
 
 

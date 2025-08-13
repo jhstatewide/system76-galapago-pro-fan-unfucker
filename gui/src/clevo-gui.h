@@ -47,6 +47,7 @@ private slots:
     void cycleDisplayLayout();
     // DBus signal handler
     void onStatusChanged(int cpuTemp, int fanDuty, int fanRpm, bool autoMode);
+    void onStatusChangedMap(const QVariantMap &m);
 
 private:
     // Window properties

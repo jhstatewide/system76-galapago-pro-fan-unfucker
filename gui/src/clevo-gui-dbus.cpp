@@ -43,6 +43,13 @@ ClevoMonitor::ClevoMonitor(QWidget *parent)
 
     // Connect to DBus StatusChanged signal for push updates
     auto bus = QDBusConnection::systemBus();
+    // Connect to typed signal if available, plus legacy fallback
+    bus.connect(DBUS_SERVICE_NAME,
+                DBUS_OBJECT_PATH,
+                DBUS_INTERFACE,
+                "StatusChanged2",
+                this,
+                SLOT(onStatusChangedMap(QVariantMap)));
     bus.connect(DBUS_SERVICE_NAME,
                 DBUS_OBJECT_PATH,
                 DBUS_INTERFACE,
@@ -182,13 +189,21 @@ void ClevoMonitor::updateStatus()
     }
     
     QDBusConnection connection = QDBusConnection::systemBus();
-    QDBusMessage msg = QDBusMessage::createMethodCall(
-        DBUS_SERVICE_NAME,
-        DBUS_OBJECT_PATH,
-        DBUS_INTERFACE,
-        "GetStatus"
-    );
-    
+    // Try typed method first (a{sv})
+    QDBusMessage msg2 = QDBusMessage::createMethodCall(DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE, "GetStatus2");
+    QDBusReply<QVariantMap> reply2 = connection.call(msg2, QDBus::BlockWithGui, 1000);
+    if (reply2.isValid()) {
+        const auto m = reply2.value();
+        cpuTemp = m.value("cpu_temp").toInt();
+        fanDuty = m.value("fan_duty").toInt();
+        fanRpm  = m.value("fan_rpm").toInt();
+        autoMode = m.value("auto_mode").toBool();
+        dataValid = true;
+        update();
+        return;
+    }
+    // Fallback to legacy string
+    QDBusMessage msg = QDBusMessage::createMethodCall(DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE, "GetStatus");
     QDBusReply<QString> reply = connection.call(msg, QDBus::BlockWithGui, 1000);
     if (reply.isValid()) {
         QString response = reply.value();
@@ -197,8 +212,6 @@ void ClevoMonitor::updateStatus()
         update();
     } else {
         qDebug() << "Failed to get status:" << reply.error().message();
-        // Soft failure: don't immediately drop connection/subscription
-        // Allow signal-driven updates to continue if subscription is active
     }
 }
 
@@ -447,6 +460,17 @@ void ClevoMonitor::onStatusChanged(int newCpuTemp, int newFanDuty, int newFanRpm
         // Try resubscribe once if we got a signal but think we're unsubscribed
         subscribeToStatus();
     }
+    update();
+}
+
+void ClevoMonitor::onStatusChangedMap(const QVariantMap &m)
+{
+    cpuTemp = m.value("cpu_temp").toInt();
+    fanDuty = m.value("fan_duty").toInt();
+    fanRpm  = m.value("fan_rpm").toInt();
+    autoMode = m.value("auto_mode").toBool();
+    dataValid = true;
+    dbusConnected = true;
     update();
 }
 
