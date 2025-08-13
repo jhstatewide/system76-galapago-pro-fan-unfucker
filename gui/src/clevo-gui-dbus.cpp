@@ -43,19 +43,13 @@ ClevoMonitor::ClevoMonitor(QWidget *parent)
 
     // Connect to DBus StatusChanged signal for push updates
     auto bus = QDBusConnection::systemBus();
-    // Connect to typed signal if available, plus legacy fallback
+    // Connect to typed signal
     bus.connect(DBUS_SERVICE_NAME,
                 DBUS_OBJECT_PATH,
                 DBUS_INTERFACE,
                 "StatusChanged2",
                 this,
                 SLOT(onStatusChangedMap(QVariantMap)));
-    bus.connect(DBUS_SERVICE_NAME,
-                DBUS_OBJECT_PATH,
-                DBUS_INTERFACE,
-                "StatusChanged",
-                this,
-                SLOT(onStatusChanged(int,int,int,bool)));
 }
 
 ClevoMonitor::~ClevoMonitor()
@@ -202,35 +196,10 @@ void ClevoMonitor::updateStatus()
         update();
         return;
     }
-    // Fallback to legacy string
-    QDBusMessage msg = QDBusMessage::createMethodCall(DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE, "GetStatus");
-    QDBusReply<QString> reply = connection.call(msg, QDBus::BlockWithGui, 1000);
-    if (reply.isValid()) {
-        QString response = reply.value();
-        parseStatusResponse(response);
-        dataValid = true;
-        update();
-    } else {
-        qDebug() << "Failed to get status:" << reply.error().message();
-    }
+    qDebug() << "Failed to get status2:" << reply2.error().message();
 }
 
-void ClevoMonitor::parseStatusResponse(const QString &response)
-{
-    // Parse response format: "CPU:XX FAN_DUTY:XX FAN_RPM:XX AUTO:XX"
-    QStringList parts = response.split(" ");
-    for (const QString &part : parts) {
-        if (part.startsWith("CPU:")) {
-            cpuTemp = part.mid(4).toInt();
-        } else if (part.startsWith("FAN_DUTY:")) {
-            fanDuty = part.mid(9).toInt();
-        } else if (part.startsWith("FAN_RPM:")) {
-            fanRpm = part.mid(8).toInt();
-        } else if (part.startsWith("AUTO:")) {
-            autoMode = (part.mid(5).toInt() != 0);
-        }
-    }
-}
+// removed legacy parseStatusResponse
 
 void ClevoMonitor::sendCommandDBus(const QString &command)
 {
@@ -448,20 +417,7 @@ void ClevoMonitor::contextMenuEvent(QContextMenuEvent *event)
     contextMenu->exec(event->globalPos());
 }
 
-void ClevoMonitor::onStatusChanged(int newCpuTemp, int newFanDuty, int newFanRpm, bool newAutoMode)
-{
-    cpuTemp = newCpuTemp;
-    fanDuty = newFanDuty;
-    fanRpm = newFanRpm;
-    autoMode = newAutoMode;
-    dataValid = true;
-    dbusConnected = true;
-    if (!dbusSubscribed) {
-        // Try resubscribe once if we got a signal but think we're unsubscribed
-        subscribeToStatus();
-    }
-    update();
-}
+// removed legacy slot onStatusChanged(int,int,int,bool)
 
 void ClevoMonitor::onStatusChangedMap(const QVariantMap &m)
 {

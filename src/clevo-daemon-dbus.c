@@ -110,7 +110,6 @@ static int check_dbus_system_bus(void) {
 
 // Function declarations
 static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* msg, void* user_data);
-static int send_signal(const char* signal_name, int cpu_temp, int fan_duty, int fan_rpm, int auto_mode);
 static int send_signal_map(const char* signal_name, int cpu_temp, int fan_duty, int fan_rpm, int auto_mode);
 
 static void dbus_signal_handler(int sig);
@@ -242,8 +241,7 @@ int broadcast_status_update(int cpu_temp, int fan_duty, int fan_rpm, int auto_mo
         // No clients listening, don't waste CPU on signal creation
         return 0;
     }
-    // Send both legacy and typed signals for compatibility
-    send_signal("StatusChanged", cpu_temp, fan_duty, fan_rpm, auto_mode);
+    // Send typed signal only
     send_signal_map("StatusChanged2", cpu_temp, fan_duty, fan_rpm, auto_mode);
     return 0;
 }
@@ -320,52 +318,7 @@ static DBusHandlerResult handle_method_call(DBusConnection* conn, DBusMessage* m
     }
     
     // Handle different method calls
-    if (strcmp(method_name, "GetStatus") == 0) {
-        if (dbus_debug_mode) {
-            fprintf(stderr, "DBUS_DEBUG: Handling GetStatus method call\n");
-        }
-        
-        // Check if share_info is valid
-        if (!share_info) {
-            fprintf(stderr, "ERROR: share_info is NULL!\n");
-            return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
-        }
-        
-        // Create reply message
-        DBusMessage* reply = dbus_message_new_method_return(msg);
-        if (!reply) {
-            fprintf(stderr, "ERROR: Failed to create reply message\n");
-            return DBUS_HANDLER_RESULT_NEED_MEMORY;
-        }
-        
-        // Add response string
-        DBusMessageIter iter;
-        dbus_message_iter_init_append(reply, &iter);
-        
-        // Create response string
-        char response[256];
-        snprintf(response, sizeof(response), 
-                "CPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d",
-                share_info->cpu_temp,
-                share_info->fan_duty,
-                share_info->fan_rpms,
-                share_info->auto_duty);
-        
-        // Use a const pointer to the string
-        const char* response_ptr = response;
-        dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &response_ptr);
-        
-        // Send reply
-        if (!dbus_connection_send(dbus_conn, reply, NULL)) {
-            fprintf(stderr, "ERROR: Failed to send reply\n");
-            dbus_message_unref(reply);
-            return DBUS_HANDLER_RESULT_NEED_MEMORY;
-        }
-        
-        dbus_message_unref(reply);
-        return DBUS_HANDLER_RESULT_HANDLED;
-        
-    } else if (strcmp(method_name, "GetStatus2") == 0) {
+    if (strcmp(method_name, "GetStatus2") == 0) {
         if (dbus_debug_mode) {
             fprintf(stderr, "DBUS_DEBUG: Handling GetStatus2 method call (a{sv})\n");
         }

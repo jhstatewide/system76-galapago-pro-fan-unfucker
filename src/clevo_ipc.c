@@ -101,30 +101,8 @@ int clevo_get_status(ClevoIpc *handle, ClevoStatus *out_status) {
             }
         }
     }
-    // Fallback to legacy string method
-    DBusMessage *msg = dbus_message_new_method_call(DBUS_SERVICE_NAME, DBUS_OBJECT_PATH, DBUS_INTERFACE, "GetStatus");
-    if (!msg) return -1;
-    DBusMessage *reply = dbus_connection_send_with_reply_and_block(handle->conn, msg, -1, NULL);
-    dbus_message_unref(msg);
-    if (!reply) return -1;
-    DBusMessageIter iter; dbus_message_iter_init(reply, &iter);
-    const char *resp = NULL;
-    if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_STRING) {
-        dbus_message_iter_get_basic(&iter, &resp);
-    }
-    int ok = -1;
-    if (resp) {
-        int cpu, duty, rpm, auto_mode;
-        if (sscanf(resp, "CPU:%d FAN_DUTY:%d FAN_RPM:%d AUTO:%d", &cpu, &duty, &rpm, &auto_mode) == 4) {
-            out_status->cpu_temp = cpu;
-            out_status->fan_duty = duty;
-            out_status->fan_rpm = rpm;
-            out_status->auto_mode = auto_mode;
-            ok = 0;
-        }
-    }
-    dbus_message_unref(reply);
-    return ok;
+    // No legacy fallback
+    return -1;
 }
 
 int clevo_set_fan_duty(ClevoIpc *handle, int duty) {

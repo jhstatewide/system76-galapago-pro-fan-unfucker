@@ -46,7 +46,7 @@ private slots:
     void toggleCharts(); // New slot for chart toggle
     void cycleDisplayLayout();
     // DBus signal handler
-    void onStatusChanged(int cpuTemp, int fanDuty, int fanRpm, bool autoMode);
+    // removed legacy typed params signal handler
     void onStatusChangedMap(const QVariantMap &m);
 
 private:
@@ -80,11 +80,7 @@ private:
     QColor getFanRpmColor(int rpm, int duty);
     QString getTemperatureStatus(int temp);
     
-    // Socket communication
-    bool connectToDaemon();
-    bool sendCommand(const QString &command);
-    bool receiveResponse(QString &response);
-    void parseStatusResponse(const QString &response);
+    // removed legacy socket and string parsing helpers
     
     // DBus methods (added for DBus implementation)
     void connectToDaemonDBus(); // Renamed to avoid conflict
